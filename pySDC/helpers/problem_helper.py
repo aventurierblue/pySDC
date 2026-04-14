@@ -39,7 +39,13 @@ def get_steps(derivative, order, stencil_type):
     return n, steps
 
 
-def get_finite_difference_stencil(derivative, order=None, stencil_type=None, steps=None):
+def get_finite_difference_stencil(
+    derivative,
+    order=None,
+    stencil_type=None,
+    steps=None,
+    float_precision=np.dtype('float64'),
+):
     """
     Derive general finite difference stencils from Taylor expansions
 
@@ -54,27 +60,34 @@ def get_finite_difference_stencil(derivative, order=None, stencil_type=None, ste
         numpy.ndarray: The offsets for the stencil
     """
 
+    float_precision = np.dtype(float_precision)
+
     if steps is not None:
         n = len(steps)
     else:
         n, steps = get_steps(derivative, order, stencil_type)
 
+    steps_float = np.asarray(steps, dtype=float_precision)
+
     # make a matrix that contains the Taylor coefficients
-    A = np.zeros((n, n))
+    A = np.zeros((n, n), dtype=float_precision)
     idx = np.arange(n)
-    inv_facs = 1.0 / factorial(idx)
+    inv_facs = np.asarray(1.0 / factorial(idx), dtype=float_precision)
     for i in range(0, n):
-        A[i, :] = steps ** idx[i] * inv_facs[i]
+        A[i, :] = steps_float**idx[i] * inv_facs[i]
 
     # make a right hand side vector that is zero everywhere except at the position of the desired derivative
-    sol = np.zeros(n)
-    sol[derivative] = 1.0
+    sol = np.zeros(n, dtype=float_precision)
+    sol[derivative] = float_precision.type(1.0)
 
     # solve the linear system for the finite difference coefficients
-    coeff = np.linalg.solve(A, sol)
+    try:
+        coeff = np.linalg.solve(A, sol)
+    except TypeError as err:
+        raise TypeError(f'finite difference stencil generation does not support {float_precision.name}') from err
 
     # sort coefficients and steps
-    coeff = coeff[np.argsort(steps)]
+    coeff = np.asarray(coeff[np.argsort(steps)], dtype=float_precision)
     steps = np.sort(steps)
 
     return coeff, steps
@@ -91,6 +104,7 @@ def get_finite_difference_matrix(
     bc=None,
     cupy=False,
     bc_params=None,
+    float_precision=np.dtype('float64'),
 ):
     """
     Build FD matrix from stencils, with boundary conditions.
@@ -111,6 +125,8 @@ def get_finite_difference_matrix(
         Sparse matrix: Finite difference matrix
         numpy.ndarray: Vector containing information about the boundary conditions
     """
+    float_precision = np.dtype(float_precision)
+
     if cupy:
         import cupyx.scipy.sparse as sp
     else:
@@ -118,7 +134,11 @@ def get_finite_difference_matrix(
 
     # get stencil
     coeff, steps = get_finite_difference_stencil(
-        derivative=derivative, order=order, stencil_type=stencil_type, steps=steps
+        derivative=derivative,
+        order=order,
+        stencil_type=stencil_type,
+        steps=steps,
+        float_precision=float_precision,
     )
 
     if type(bc) is not tuple:
@@ -128,19 +148,19 @@ def get_finite_difference_matrix(
     if type(bc_params) is not list:
         bc_params = [bc_params, bc_params]
 
-    b = np.zeros(size**dim)
+    b = np.zeros(size**dim, dtype=float_precision)
 
     if bc[0] == 'periodic':
         assert bc[1] == 'periodic'
-        A_1d = 0 * sp.eye(size, format='csc')
+        A_1d = 0 * sp.eye(size, format='csc', dtype=float_precision)
         for i in steps:
-            A_1d += coeff[i] * sp.eye(size, k=steps[i])
+            A_1d += coeff[i] * sp.eye(size, k=steps[i], dtype=float_precision)
             if steps[i] > 0:
-                A_1d += coeff[i] * sp.eye(size, k=-size + steps[i])
+                A_1d += coeff[i] * sp.eye(size, k=-size + steps[i], dtype=float_precision)
             if steps[i] < 0:
-                A_1d += coeff[i] * sp.eye(size, k=size + steps[i])
+                A_1d += coeff[i] * sp.eye(size, k=size + steps[i], dtype=float_precision)
     else:
-        A_1d = sp.diags(coeff, steps, shape=(size, size), format='lil')
+        A_1d = sp.diags(coeff, steps, shape=(size, size), format='lil', dtype=float_precision)
 
         # Default parameters for Dirichlet and Neumann BCs
         bc_params_defaults = {
@@ -182,6 +202,7 @@ def get_finite_difference_matrix(
                         derivative=derivative,
                         order=2 * (i + 1),
                         stencil_type='center',
+                        float_precision=float_precision,
                     )
                 else:
                     # -- shift stencil close to boundary
@@ -191,7 +212,11 @@ def get_finite_difference_matrix(
                         else np.arange(-(order + derivative) + (i + 2), (i + 2))
                     )
 
-                    b_coeff, b_steps = get_finite_difference_stencil(derivative=derivative, steps=b_steps)
+                    b_coeff, b_steps = get_finite_difference_stencil(
+                        derivative=derivative,
+                        steps=b_steps,
+                        float_precision=float_precision,
+                    )
 
                 # -- column slice where to put coefficients in the A matrix
                 colSlice = slice(None, len(b_coeff) - 1) if iS == 0 else slice(-len(b_coeff) + 1, None)
@@ -209,7 +234,10 @@ def get_finite_difference_matrix(
 
                     # -- generate the first derivative stencil
                     n_coeff, n_steps = get_finite_difference_stencil(
-                        derivative=1, order=nOrder, stencil_type="forward" if iS == 0 else "backward"
+                        derivative=1,
+                        order=nOrder,
+                        stencil_type="forward" if iS == 0 else "backward",
+                        float_precision=float_precision,
                     )
 
                     # -- column slice where to put coefficients in the A matrix
@@ -226,12 +254,12 @@ def get_finite_difference_matrix(
     if dim == 1:
         A = A_1d
     elif dim == 2:
-        A = sp.kron(A_1d, sp.eye(size)) + sp.kron(sp.eye(size), A_1d)
+        A = sp.kron(A_1d, sp.eye(size, dtype=float_precision)) + sp.kron(sp.eye(size, dtype=float_precision), A_1d)
     elif dim == 3:
         A = (
-            sp.kron(A_1d, sp.eye(size**2))
-            + sp.kron(sp.eye(size**2), A_1d)
-            + sp.kron(sp.kron(sp.eye(size), A_1d), sp.eye(size))
+            sp.kron(A_1d, sp.eye(size**2, dtype=float_precision))
+            + sp.kron(sp.eye(size**2, dtype=float_precision), A_1d)
+            + sp.kron(sp.kron(sp.eye(size, dtype=float_precision), A_1d), sp.eye(size, dtype=float_precision))
         )
     else:
         raise NotImplementedError(f'Dimension {dim} not implemented.')
@@ -242,7 +270,7 @@ def get_finite_difference_matrix(
     return A, b
 
 
-def get_1d_grid(size, bc, left_boundary=0.0, right_boundary=1.0):
+def get_1d_grid(size, bc, left_boundary=0.0, right_boundary=1.0, float_precision=np.dtype('float64')):
     """
     Generate a grid in one dimension and obtain mesh spacing for finite difference discretization.
 
@@ -256,13 +284,14 @@ def get_1d_grid(size, bc, left_boundary=0.0, right_boundary=1.0):
         float: mesh spacing
         numpy.ndarray: 1d mesh
     """
+    float_precision = np.dtype(float_precision)
     L = right_boundary - left_boundary
     if bc == 'periodic':
-        dx = L / size
-        xvalues = np.array([left_boundary + dx * i for i in range(size)])
+        dx = float_precision.type(L / size)
+        xvalues = np.array([left_boundary + dx * i for i in range(size)], dtype=float_precision)
     elif "dirichlet" in bc or "neumann" in bc:
-        dx = L / (size + 1)
-        xvalues = np.array([left_boundary + dx * (i + 1) for i in range(size)])
+        dx = float_precision.type(L / (size + 1))
+        xvalues = np.array([left_boundary + dx * (i + 1) for i in range(size)], dtype=float_precision)
     else:
         raise NotImplementedError(f'Boundary conditions \"{bc}\" not implemented.')
 

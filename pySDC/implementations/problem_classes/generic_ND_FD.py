@@ -94,7 +94,10 @@ class GenericNDimFinDiff(Problem):
         solver_type='direct',
         bc='periodic',
         bcParams=None,
+        float_precision=np.dtype('float64'),
     ):
+        float_precision = np.dtype(float_precision)
+
         # make sure parameters have the correct types
         if type(nvars) not in [int, tuple]:
             raise ProblemError('nvars should be either tuple or int')
@@ -133,9 +136,15 @@ class GenericNDimFinDiff(Problem):
             raise ProblemError('need a square domain, got %s' % nvars)
 
         # invoke super init, passing number of dofs
-        super().__init__(init=(nvars[0] if ndim == 1 else nvars, None, np.dtype('float64')))
+        super().__init__(init=(nvars[0] if ndim == 1 else nvars, None, float_precision), float_precision=float_precision)
 
-        dx, xvalues = problem_helper.get_1d_grid(size=nvars[0], bc=bc, left_boundary=0.0, right_boundary=1.0)
+        dx, xvalues = problem_helper.get_1d_grid(
+            size=nvars[0],
+            bc=bc,
+            left_boundary=0.0,
+            right_boundary=1.0,
+            float_precision=float_precision,
+        )
 
         self.A, _ = problem_helper.get_finite_difference_matrix(
             derivative=derivative,
@@ -145,14 +154,17 @@ class GenericNDimFinDiff(Problem):
             size=nvars[0],
             dim=ndim,
             bc=bc,
+            float_precision=float_precision,
         )
         self.A *= coeff
 
         self.xvalues = xvalues
-        self.Id = sp.eye(np.prod(nvars), format='csc')
+        self.Id = sp.eye(np.prod(nvars), format='csc', dtype=float_precision)
 
         # store attribute and register them as parameters
-        self._makeAttributeAndRegister('nvars', 'stencil_type', 'order', 'bc', localVars=locals(), readOnly=True)
+        self._makeAttributeAndRegister(
+            'nvars', 'stencil_type', 'order', 'bc', 'float_precision', localVars=locals(), readOnly=True
+        )
         self._makeAttributeAndRegister('freq', 'lintol', 'liniter', 'solver_type', localVars=locals())
 
         if self.solver_type != 'direct':
@@ -235,30 +247,35 @@ class GenericNDimFinDiff(Problem):
             self.u_init,
         )
 
-        if solver_type == 'direct':
-            sol[:] = spsolve(Id - factor * A, rhs.flatten()).reshape(nvars)
-        elif solver_type == 'GMRES':
-            sol[:] = gmres(
-                Id - factor * A,
-                rhs.flatten(),
-                x0=u0.flatten(),
-                rtol=lintol,
-                maxiter=liniter,
-                atol=0,
-                callback=self.work_counters[solver_type],
-                callback_type='legacy',
-            )[0].reshape(nvars)
-        elif solver_type == 'CG':
-            sol[:] = cg(
-                Id - factor * A,
-                rhs.flatten(),
-                x0=u0.flatten(),
-                rtol=lintol,
-                maxiter=liniter,
-                atol=0,
-                callback=self.work_counters[solver_type],
-            )[0].reshape(nvars)
-        else:
-            raise ValueError(f'solver type "{solver_type}" not known in generic advection-diffusion implementation!')
+        try:
+            if solver_type == 'direct':
+                sol[:] = spsolve(Id - factor * A, rhs.flatten()).reshape(nvars)
+            elif solver_type == 'GMRES':
+                sol[:] = gmres(
+                    Id - factor * A,
+                    rhs.flatten(),
+                    x0=u0.flatten(),
+                    rtol=lintol,
+                    maxiter=liniter,
+                    atol=0,
+                    callback=self.work_counters[solver_type],
+                    callback_type='legacy',
+                )[0].reshape(nvars)
+            elif solver_type == 'CG':
+                sol[:] = cg(
+                    Id - factor * A,
+                    rhs.flatten(),
+                    x0=u0.flatten(),
+                    rtol=lintol,
+                    maxiter=liniter,
+                    atol=0,
+                    callback=self.work_counters[solver_type],
+                )[0].reshape(nvars)
+            else:
+                raise ValueError(f'solver type "{solver_type}" not known in generic advection-diffusion implementation!')
+        except TypeError as err:
+            raise TypeError(
+                f'linear solver {solver_type} does not support float precision {self.float_precision.name}'
+            ) from err
 
         return sol

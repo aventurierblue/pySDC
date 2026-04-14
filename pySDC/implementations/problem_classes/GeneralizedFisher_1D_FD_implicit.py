@@ -166,6 +166,7 @@ class generalized_fisher(Problem):
 
             # newton update: u1 = u0 - g/dg
             u -= spsolve(dg, g)
+            #print(u)
 
             # increase iteration count
             n += 1
@@ -177,7 +178,7 @@ class generalized_fisher(Problem):
 
         if n == self.newton_maxiter:
             self.logger.warning('Newton did not converge after %i iterations, error is %s' % (n, res))
-
+        #print(u)
         return u
 
     def eval_f(self, u, t):
@@ -232,7 +233,7 @@ class generalized_fisher(Problem):
 
         lam1 = self.lambda0 / 2.0 * ((self.nu / 2.0 + 1) ** 0.5 + (self.nu / 2.0 + 1) ** (-0.5))
         sig1 = lam1 - np.sqrt(lam1**2 - self.lambda0**2)
-        me[:] = (1 + (2 ** (self.nu / 2.0) - 1) * np.exp(-self.nu / 2.0 * sig1 * (xvalues + 2 * lam1 * t))) ** (
+        me[:] = (1 + (2 ** (self.nu / 2.0) - 1) * np.exp(-self.nu / 2.0 * sig1 * (xvalues + 2 * lam1 * t ))) ** (
             -2.0 / self.nu
         )
         return me

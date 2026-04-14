@@ -20,11 +20,14 @@ for k, v in QDELTA_GENERATORS.items():
 class _Pars(FrozenClass):
     def __init__(self, pars: Dict[str, Any]) -> None:
         self.do_coll_update: bool = False
+        self.float_precision = np.dtype('float64')
         self.initial_guess: str = 'spread'  # default value (see also below)
         self.skip_residual_computation: tuple = ()  # gain performance at the cost of correct residual output
 
         for k, v in pars.items():
             if k != 'collocation_class':
+                if k == 'float_precision':
+                    v = np.dtype(v)
                 setattr(self, k, v)
 
         self._freeze()
@@ -73,6 +76,8 @@ class Sweeper(object):
         if 'collocation_class' not in params:
             params['collocation_class'] = CollBase
 
+        params['float_precision'] = np.dtype(params.get('float_precision', np.dtype('float64')))
+
         # prepare random generator for initial guess
         if params.get('initial_guess', 'spread') == 'random':  # default value (see also above)
             params['random_seed'] = params.get('random_seed', 1984)
@@ -111,7 +116,7 @@ class Sweeper(object):
 
     def get_Qdelta_explicit(self, qd_type: str, k: Optional[int] = None) -> np.ndarray:
         coll = self.coll
-        QDmat = np.zeros(coll.Qmat.shape, dtype=float)
+        QDmat = np.zeros(coll.Qmat.shape, dtype=self.params.float_precision)
         if not hasattr(self, "genQE") or qd_type not in QDELTA_GENERATORS_ALIASES[type(self.genQE)]:
             self.genQE: QDeltaGenerator = self.buildGenerator(qd_type)
         QDmat[1:, 1:], QDmat[1:, 0] = self.genQE.genCoeffs(k=k, dTau=True)

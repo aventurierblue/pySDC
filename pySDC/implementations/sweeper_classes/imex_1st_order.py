@@ -30,9 +30,11 @@ class imex_1st_order(Sweeper):
 
         super().__init__(params, level)
 
+        dtype = self.params.float_precision
+
         # IMEX integration matrices
-        self.QI = self.get_Qdelta_implicit(qd_type=self.params.QI)
-        self.QE = self.get_Qdelta_explicit(qd_type=self.params.QE)
+        self.QI = self.get_Qdelta_implicit(qd_type=self.params.QI).astype(dtype, copy=False)
+        self.QE = self.get_Qdelta_explicit(qd_type=self.params.QE).astype(dtype, copy=False)
 
     def integrate(self):
         """

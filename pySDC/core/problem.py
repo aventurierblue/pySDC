@@ -10,6 +10,8 @@ Module containing the base Problem class for pySDC
 import logging
 from typing import Any, Dict, Optional, Type, Callable
 
+import numpy as np
+
 from pySDC.core.common import RegisterParams
 
 
@@ -63,9 +65,10 @@ class Problem(RegisterParams):
     dtype_u: Optional[Type[Any]] = None
     dtype_f: Optional[Type[Any]] = None
 
-    def __init__(self, init: Any) -> None:
+    def __init__(self, init: Any, float_precision: Any = np.dtype('float64')) -> None:
         self.work_counters: Dict[str, WorkCounter] = {}  # Dictionary to store WorkCounter objects
         self.init: Any = init  # Initialization parameter to instantiate data types
+        self.float_precision = np.dtype(float_precision)
 
     @property
     def u_init(self) -> Any:

@@ -118,3 +118,14 @@ def test_partialquadraturewithS(nNodes, nodeType, quadType):
             + ", partial quadrature rule from Smat failed to integrate polynomial of degree M-1 exactly for M = "
             + str(M)
         )
+
+
+@pytest.mark.base
+def test_float_precision_dtype():
+    coll = CollBase(3, 0.0, 1.0, node_type='LEGENDRE', quad_type='RADAU-RIGHT', float_precision=np.dtype('float32'))
+
+    assert coll.nodes.dtype == np.dtype('float32')
+    assert coll.weights.dtype == np.dtype('float32')
+    assert coll.Qmat.dtype == np.dtype('float32')
+    assert coll.Smat.dtype == np.dtype('float32')
+    assert coll.delta_m.dtype == np.dtype('float32')

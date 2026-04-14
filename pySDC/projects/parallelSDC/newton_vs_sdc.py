@@ -1,5 +1,6 @@
 import os
 import pickle
+import numpy as np
 
 import pySDC.helpers.plot_helper as plt_helper
 from pySDC.helpers.stats_helper import get_sorted
@@ -7,6 +8,8 @@ from pySDC.helpers.stats_helper import get_sorted
 from pySDC.implementations.controller_classes.controller_nonMPI import controller_nonMPI
 from pySDC.implementations.sweeper_classes.generic_implicit import generic_implicit
 from pySDC.projects.parallelSDC.ErrReductionHook import err_reduction_hook
+
+from pySDC.implementations.problem_classes.GeneralizedFisher_1D_FD_implicit import generalized_fisher
 from pySDC.projects.parallelSDC.GeneralizedFisher_1D_FD_implicit_Jac import generalized_fisher_jac
 from pySDC.projects.parallelSDC.linearized_implicit_fixed_parallel import linearized_implicit_fixed_parallel
 from pySDC.projects.parallelSDC.linearized_implicit_fixed_parallel_prec import linearized_implicit_fixed_parallel_prec
@@ -15,18 +18,18 @@ from pySDC.projects.parallelSDC.linearized_implicit_fixed_parallel_prec import l
 def main():
     # initialize level parameters
     level_params = dict()
-    level_params['restol'] = 1e-12
+    level_params['restol'] = 1e-15
 
     # This comes as read-in for the step class (this is optional!)
     step_params = dict()
-    step_params['maxiter'] = 20
+    step_params['maxiter'] = 100_000
 
     # This comes as read-in for the problem class
     problem_params = dict()
     problem_params['nu'] = 1
-    problem_params['nvars'] = 2047
-    problem_params['lambda0'] = 5.0
-    problem_params['newton_maxiter'] = 50
+    problem_params['nvars'] = 127 #2047
+    #problem_params['lambda0'] = 5.0
+    problem_params['newton_maxiter'] = 100_000
     problem_params['newton_tol'] = 1e-12
     problem_params['interval'] = (-5, 5)
 
@@ -44,7 +47,7 @@ def main():
 
     # Fill description dictionary for easy hierarchy creation
     description = dict()
-    description['problem_class'] = generalized_fisher_jac
+    description['problem_class'] =  generalized_fisher # generalized_fisher_jac
     description['problem_params'] = problem_params
     description['sweeper_params'] = sweeper_params
     description['step_params'] = step_params
@@ -52,9 +55,10 @@ def main():
     # setup parameters "in time"
     t0 = 0
     Tend = 0.1
-
-    sweeper_list = [generic_implicit, linearized_implicit_fixed_parallel, linearized_implicit_fixed_parallel_prec]
-    dt_list = [Tend / 2**i for i in range(1, 5)]
+    print("Hello world")
+    #sweeper_list = [generic_implicit, linearized_implicit_fixed_parallel, linearized_implicit_fixed_parallel_prec]
+    sweeper_list = [generic_implicit]
+    dt_list = Tend/2 * 1/np.power(10, np.arange(0, 4))
 
     results = dict()
     results['sweeper_list'] = [sweeper.__name__ for sweeper in sweeper_list]
@@ -79,6 +83,8 @@ def main():
 
             # call main function to get things done...
             uend, stats = controller.run(u0=uinit, t0=t0, Tend=Tend)
+            #print(np.linalg.norm(uend.flatten() - P.u_exact(Tend).flatten(), np.inf))
+            print(uend)
 
             # filter statistics
             error_pre = get_sorted(stats, type='error_pre_iteration', sortby='iter')[0][1]

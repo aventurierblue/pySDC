@@ -137,6 +137,13 @@ class Step(FrozenClass):
         # generate list of dictionaries out of the description
         descr_list = self.__dict_to_list(descr_new)
 
+        for item in descr_list:
+            problem_params = item.get('problem_params', {})
+            sweeper_params = item.get('sweeper_params', {})
+            if 'float_precision' in problem_params and 'float_precision' not in sweeper_params:
+                item['sweeper_params'] = sweeper_params.copy()
+                item['sweeper_params']['float_precision'] = problem_params['float_precision']
+
         # sanity check: is there a base_transfer class? Is there one even if only a single level is specified?
         if len(descr_list) > 1 and not descr_new['space_transfer_class']:
             msg = 'need %s to instantiate step, only got %s' % ('space_transfer_class', str(descr_new.keys()))

@@ -52,6 +52,7 @@ class CollBase(object):
         tright: float = 1,
         node_type: str = 'LEGENDRE',
         quad_type: Optional[str] = None,
+        float_precision: Any = np.dtype('float64'),
         **kwargs: Any,
     ) -> None:
         """
@@ -78,8 +79,9 @@ class CollBase(object):
 
         # Set base attributes
         self.num_nodes = num_nodes
-        self.tleft = tleft
-        self.tright = tright
+        self.float_precision = np.dtype(float_precision)
+        self.tleft = self.float_precision.type(tleft)
+        self.tright = self.float_precision.type(tright)
         self.node_type = node_type
         self.quad_type = quad_type
         self.left_is_node = self.quad_type in ['LOBATTO', 'RADAU-LEFT']
@@ -89,14 +91,14 @@ class CollBase(object):
         self.order = self.generator.order
 
         # Compute coefficients
-        self.nodes = self._getNodes = self.generator.nodes.copy()
-        self.weights = self.generator.weights.copy()
+        self.nodes = self._getNodes = self.generator.nodes.astype(self.float_precision, copy=True)
+        self.weights = self.generator.weights.astype(self.float_precision, copy=True)
 
-        Q = np.zeros([num_nodes + 1, num_nodes + 1], dtype=float)
+        Q = np.zeros([num_nodes + 1, num_nodes + 1], dtype=self.float_precision)
         Q[1:, 1:] = self.generator.Q
         self.Qmat = Q
 
-        S = np.zeros([num_nodes + 1, num_nodes + 1], dtype=float)
+        S = np.zeros([num_nodes + 1, num_nodes + 1], dtype=self.float_precision)
         S[1:, 1:] = super(self.generator.__class__, self.generator).S
         # Note: qmat redefines the S matrix for collocation with integrals,
         # instead of differences of the Q matrix coefficients.
@@ -133,7 +135,7 @@ class CollBase(object):
             numpy.ndarray: distances between the nodes
         """
         M = self.num_nodes
-        delta = np.zeros(M)
+        delta = np.zeros(M, dtype=self.float_precision)
         delta[0] = self.nodes[0] - self.tleft
         for m in np.arange(1, M):
             delta[m] = self.nodes[m] - self.nodes[m - 1]
