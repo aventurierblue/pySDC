@@ -1,0 +1,606 @@
+diff --git a/pySDC/core/collocation.py b/pySDC/core/collocation.py
+index f8965b69e..dfdc68d3f 100644
+--- a/pySDC/core/collocation.py
++++ b/pySDC/core/collocation.py
+@@ -52,6 +52,7 @@ class CollBase(object):
+         tright: float = 1,
+         node_type: str = 'LEGENDRE',
+         quad_type: Optional[str] = None,
++        float_precision: Any = np.dtype('float64'),
+         **kwargs: Any,
+     ) -> None:
+         """
+@@ -78,8 +79,9 @@ class CollBase(object):
+ 
+         # Set base attributes
+         self.num_nodes = num_nodes
+-        self.tleft = tleft
+-        self.tright = tright
++        self.float_precision = np.dtype(float_precision)
++        self.tleft = self.float_precision.type(tleft)
++        self.tright = self.float_precision.type(tright)
+         self.node_type = node_type
+         self.quad_type = quad_type
+         self.left_is_node = self.quad_type in ['LOBATTO', 'RADAU-LEFT']
+@@ -89,14 +91,14 @@ class CollBase(object):
+         self.order = self.generator.order
+ 
+         # Compute coefficients
+-        self.nodes = self._getNodes = self.generator.nodes.copy()
+-        self.weights = self.generator.weights.copy()
++        self.nodes = self._getNodes = self.generator.nodes.astype(self.float_precision, copy=True)
++        self.weights = self.generator.weights.astype(self.float_precision, copy=True)
+ 
+-        Q = np.zeros([num_nodes + 1, num_nodes + 1], dtype=float)
++        Q = np.zeros([num_nodes + 1, num_nodes + 1], dtype=self.float_precision)
+         Q[1:, 1:] = self.generator.Q
+         self.Qmat = Q
+ 
+-        S = np.zeros([num_nodes + 1, num_nodes + 1], dtype=float)
++        S = np.zeros([num_nodes + 1, num_nodes + 1], dtype=self.float_precision)
+         S[1:, 1:] = super(self.generator.__class__, self.generator).S
+         # Note: qmat redefines the S matrix for collocation with integrals,
+         # instead of differences of the Q matrix coefficients.
+@@ -133,7 +135,7 @@ class CollBase(object):
+             numpy.ndarray: distances between the nodes
+         """
+         M = self.num_nodes
+-        delta = np.zeros(M)
++        delta = np.zeros(M, dtype=self.float_precision)
+         delta[0] = self.nodes[0] - self.tleft
+         for m in np.arange(1, M):
+             delta[m] = self.nodes[m] - self.nodes[m - 1]
+diff --git a/pySDC/core/problem.py b/pySDC/core/problem.py
+index f9a84b234..369cd804a 100644
+--- a/pySDC/core/problem.py
++++ b/pySDC/core/problem.py
+@@ -10,6 +10,8 @@ Module containing the base Problem class for pySDC
+ import logging
+ from typing import Any, Dict, Optional, Type, Callable
+ 
++import numpy as np
++
+ from pySDC.core.common import RegisterParams
+ 
+ 
+@@ -63,9 +65,10 @@ class Problem(RegisterParams):
+     dtype_u: Optional[Type[Any]] = None
+     dtype_f: Optional[Type[Any]] = None
+ 
+-    def __init__(self, init: Any) -> None:
++    def __init__(self, init: Any, float_precision: Any = np.dtype('float64')) -> None:
+         self.work_counters: Dict[str, WorkCounter] = {}  # Dictionary to store WorkCounter objects
+         self.init: Any = init  # Initialization parameter to instantiate data types
++        self.float_precision = np.dtype(float_precision)
+ 
+     @property
+     def u_init(self) -> Any:
+diff --git a/pySDC/core/step.py b/pySDC/core/step.py
+index ac4df6047..acae5a48f 100644
+--- a/pySDC/core/step.py
++++ b/pySDC/core/step.py
+@@ -137,6 +137,13 @@ class Step(FrozenClass):
+         # generate list of dictionaries out of the description
+         descr_list = self.__dict_to_list(descr_new)
+ 
++        for item in descr_list:
++            problem_params = item.get('problem_params', {})
++            sweeper_params = item.get('sweeper_params', {})
++            if 'float_precision' in problem_params and 'float_precision' not in sweeper_params:
++                item['sweeper_params'] = sweeper_params.copy()
++                item['sweeper_params']['float_precision'] = problem_params['float_precision']
++
+         # sanity check: is there a base_transfer class? Is there one even if only a single level is specified?
+         if len(descr_list) > 1 and not descr_new['space_transfer_class']:
+             msg = 'need %s to instantiate step, only got %s' % ('space_transfer_class', str(descr_new.keys()))
+diff --git a/pySDC/core/sweeper.py b/pySDC/core/sweeper.py
+index c81146ff1..298584907 100644
+--- a/pySDC/core/sweeper.py
++++ b/pySDC/core/sweeper.py
+@@ -20,11 +20,14 @@ for k, v in QDELTA_GENERATORS.items():
+ class _Pars(FrozenClass):
+     def __init__(self, pars: Dict[str, Any]) -> None:
+         self.do_coll_update: bool = False
++        self.float_precision = np.dtype('float64')
+         self.initial_guess: str = 'spread'  # default value (see also below)
+         self.skip_residual_computation: tuple = ()  # gain performance at the cost of correct residual output
+ 
+         for k, v in pars.items():
+             if k != 'collocation_class':
++                if k == 'float_precision':
++                    v = np.dtype(v)
+                 setattr(self, k, v)
+ 
+         self._freeze()
+@@ -73,6 +76,8 @@ class Sweeper(object):
+         if 'collocation_class' not in params:
+             params['collocation_class'] = CollBase
+ 
++        params['float_precision'] = np.dtype(params.get('float_precision', np.dtype('float64')))
++
+         # prepare random generator for initial guess
+         if params.get('initial_guess', 'spread') == 'random':  # default value (see also above)
+             params['random_seed'] = params.get('random_seed', 1984)
+@@ -111,7 +116,7 @@ class Sweeper(object):
+ 
+     def get_Qdelta_explicit(self, qd_type: str, k: Optional[int] = None) -> np.ndarray:
+         coll = self.coll
+-        QDmat = np.zeros(coll.Qmat.shape, dtype=float)
++        QDmat = np.zeros(coll.Qmat.shape, dtype=self.params.float_precision)
+         if not hasattr(self, "genQE") or qd_type not in QDELTA_GENERATORS_ALIASES[type(self.genQE)]:
+             self.genQE: QDeltaGenerator = self.buildGenerator(qd_type)
+         QDmat[1:, 1:], QDmat[1:, 0] = self.genQE.genCoeffs(k=k, dTau=True)
+diff --git a/pySDC/helpers/problem_helper.py b/pySDC/helpers/problem_helper.py
+index 6a3928626..9e7a3c7a5 100644
+--- a/pySDC/helpers/problem_helper.py
++++ b/pySDC/helpers/problem_helper.py
+@@ -39,7 +39,13 @@ def get_steps(derivative, order, stencil_type):
+     return n, steps
+ 
+ 
+-def get_finite_difference_stencil(derivative, order=None, stencil_type=None, steps=None):
++def get_finite_difference_stencil(
++    derivative,
++    order=None,
++    stencil_type=None,
++    steps=None,
++    float_precision=np.dtype('float64'),
++):
+     """
+     Derive general finite difference stencils from Taylor expansions
+ 
+@@ -54,27 +60,34 @@ def get_finite_difference_stencil(derivative, order=None, stencil_type=None, ste
+         numpy.ndarray: The offsets for the stencil
+     """
+ 
++    float_precision = np.dtype(float_precision)
++
+     if steps is not None:
+         n = len(steps)
+     else:
+         n, steps = get_steps(derivative, order, stencil_type)
+ 
++    steps_float = np.asarray(steps, dtype=float_precision)
++
+     # make a matrix that contains the Taylor coefficients
+-    A = np.zeros((n, n))
++    A = np.zeros((n, n), dtype=float_precision)
+     idx = np.arange(n)
+-    inv_facs = 1.0 / factorial(idx)
++    inv_facs = np.asarray(1.0 / factorial(idx), dtype=float_precision)
+     for i in range(0, n):
+-        A[i, :] = steps ** idx[i] * inv_facs[i]
++        A[i, :] = steps_float**idx[i] * inv_facs[i]
+ 
+     # make a right hand side vector that is zero everywhere except at the position of the desired derivative
+-    sol = np.zeros(n)
+-    sol[derivative] = 1.0
++    sol = np.zeros(n, dtype=float_precision)
++    sol[derivative] = float_precision.type(1.0)
+ 
+     # solve the linear system for the finite difference coefficients
+-    coeff = np.linalg.solve(A, sol)
++    try:
++        coeff = np.linalg.solve(A, sol)
++    except TypeError as err:
++        raise TypeError(f'finite difference stencil generation does not support {float_precision.name}') from err
+ 
+     # sort coefficients and steps
+-    coeff = coeff[np.argsort(steps)]
++    coeff = np.asarray(coeff[np.argsort(steps)], dtype=float_precision)
+     steps = np.sort(steps)
+ 
+     return coeff, steps
+@@ -91,6 +104,7 @@ def get_finite_difference_matrix(
+     bc=None,
+     cupy=False,
+     bc_params=None,
++    float_precision=np.dtype('float64'),
+ ):
+     """
+     Build FD matrix from stencils, with boundary conditions.
+@@ -111,6 +125,8 @@ def get_finite_difference_matrix(
+         Sparse matrix: Finite difference matrix
+         numpy.ndarray: Vector containing information about the boundary conditions
+     """
++    float_precision = np.dtype(float_precision)
++
+     if cupy:
+         import cupyx.scipy.sparse as sp
+     else:
+@@ -118,7 +134,11 @@ def get_finite_difference_matrix(
+ 
+     # get stencil
+     coeff, steps = get_finite_difference_stencil(
+-        derivative=derivative, order=order, stencil_type=stencil_type, steps=steps
++        derivative=derivative,
++        order=order,
++        stencil_type=stencil_type,
++        steps=steps,
++        float_precision=float_precision,
+     )
+ 
+     if type(bc) is not tuple:
+@@ -128,19 +148,19 @@ def get_finite_difference_matrix(
+     if type(bc_params) is not list:
+         bc_params = [bc_params, bc_params]
+ 
+-    b = np.zeros(size**dim)
++    b = np.zeros(size**dim, dtype=float_precision)
+ 
+     if bc[0] == 'periodic':
+         assert bc[1] == 'periodic'
+-        A_1d = 0 * sp.eye(size, format='csc')
++        A_1d = 0 * sp.eye(size, format='csc', dtype=float_precision)
+         for i in steps:
+-            A_1d += coeff[i] * sp.eye(size, k=steps[i])
++            A_1d += coeff[i] * sp.eye(size, k=steps[i], dtype=float_precision)
+             if steps[i] > 0:
+-                A_1d += coeff[i] * sp.eye(size, k=-size + steps[i])
++                A_1d += coeff[i] * sp.eye(size, k=-size + steps[i], dtype=float_precision)
+             if steps[i] < 0:
+-                A_1d += coeff[i] * sp.eye(size, k=size + steps[i])
++                A_1d += coeff[i] * sp.eye(size, k=size + steps[i], dtype=float_precision)
+     else:
+-        A_1d = sp.diags(coeff, steps, shape=(size, size), format='lil')
++        A_1d = sp.diags(coeff, steps, shape=(size, size), format='lil', dtype=float_precision)
+ 
+         # Default parameters for Dirichlet and Neumann BCs
+         bc_params_defaults = {
+@@ -182,6 +202,7 @@ def get_finite_difference_matrix(
+                         derivative=derivative,
+                         order=2 * (i + 1),
+                         stencil_type='center',
++                        float_precision=float_precision,
+                     )
+                 else:
+                     # -- shift stencil close to boundary
+@@ -191,7 +212,11 @@ def get_finite_difference_matrix(
+                         else np.arange(-(order + derivative) + (i + 2), (i + 2))
+                     )
+ 
+-                    b_coeff, b_steps = get_finite_difference_stencil(derivative=derivative, steps=b_steps)
++                    b_coeff, b_steps = get_finite_difference_stencil(
++                        derivative=derivative,
++                        steps=b_steps,
++                        float_precision=float_precision,
++                    )
+ 
+                 # -- column slice where to put coefficients in the A matrix
+                 colSlice = slice(None, len(b_coeff) - 1) if iS == 0 else slice(-len(b_coeff) + 1, None)
+@@ -209,7 +234,10 @@ def get_finite_difference_matrix(
+ 
+                     # -- generate the first derivative stencil
+                     n_coeff, n_steps = get_finite_difference_stencil(
+-                        derivative=1, order=nOrder, stencil_type="forward" if iS == 0 else "backward"
++                        derivative=1,
++                        order=nOrder,
++                        stencil_type="forward" if iS == 0 else "backward",
++                        float_precision=float_precision,
+                     )
+ 
+                     # -- column slice where to put coefficients in the A matrix
+@@ -226,12 +254,12 @@ def get_finite_difference_matrix(
+     if dim == 1:
+         A = A_1d
+     elif dim == 2:
+-        A = sp.kron(A_1d, sp.eye(size)) + sp.kron(sp.eye(size), A_1d)
++        A = sp.kron(A_1d, sp.eye(size, dtype=float_precision)) + sp.kron(sp.eye(size, dtype=float_precision), A_1d)
+     elif dim == 3:
+         A = (
+-            sp.kron(A_1d, sp.eye(size**2))
+-            + sp.kron(sp.eye(size**2), A_1d)
+-            + sp.kron(sp.kron(sp.eye(size), A_1d), sp.eye(size))
++            sp.kron(A_1d, sp.eye(size**2, dtype=float_precision))
++            + sp.kron(sp.eye(size**2, dtype=float_precision), A_1d)
++            + sp.kron(sp.kron(sp.eye(size, dtype=float_precision), A_1d), sp.eye(size, dtype=float_precision))
+         )
+     else:
+         raise NotImplementedError(f'Dimension {dim} not implemented.')
+@@ -242,7 +270,7 @@ def get_finite_difference_matrix(
+     return A, b
+ 
+ 
+-def get_1d_grid(size, bc, left_boundary=0.0, right_boundary=1.0):
++def get_1d_grid(size, bc, left_boundary=0.0, right_boundary=1.0, float_precision=np.dtype('float64')):
+     """
+     Generate a grid in one dimension and obtain mesh spacing for finite difference discretization.
+ 
+@@ -256,13 +284,14 @@ def get_1d_grid(size, bc, left_boundary=0.0, right_boundary=1.0):
+         float: mesh spacing
+         numpy.ndarray: 1d mesh
+     """
++    float_precision = np.dtype(float_precision)
+     L = right_boundary - left_boundary
+     if bc == 'periodic':
+-        dx = L / size
+-        xvalues = np.array([left_boundary + dx * i for i in range(size)])
++        dx = float_precision.type(L / size)
++        xvalues = np.array([left_boundary + dx * i for i in range(size)], dtype=float_precision)
+     elif "dirichlet" in bc or "neumann" in bc:
+-        dx = L / (size + 1)
+-        xvalues = np.array([left_boundary + dx * (i + 1) for i in range(size)])
++        dx = float_precision.type(L / (size + 1))
++        xvalues = np.array([left_boundary + dx * (i + 1) for i in range(size)], dtype=float_precision)
+     else:
+         raise NotImplementedError(f'Boundary conditions \"{bc}\" not implemented.')
+ 
+diff --git a/pySDC/implementations/problem_classes/HeatEquation_ND_FD.py b/pySDC/implementations/problem_classes/HeatEquation_ND_FD.py
+index bf09a55fc..7c9598893 100644
+--- a/pySDC/implementations/problem_classes/HeatEquation_ND_FD.py
++++ b/pySDC/implementations/problem_classes/HeatEquation_ND_FD.py
+@@ -73,9 +73,22 @@ class heatNd_unforced(GenericNDimFinDiff):
+         solver_type='direct',
+         bc='periodic',
+         sigma=6e-2,
++        float_precision=np.dtype('float64'),
+     ):
+         """Initialization routine"""
+-        super().__init__(nvars, nu, 2, freq, stencil_type, order, lintol, liniter, solver_type, bc)
++        super().__init__(
++            nvars,
++            nu,
++            2,
++            freq,
++            stencil_type,
++            order,
++            lintol,
++            liniter,
++            solver_type,
++            bc,
++            float_precision=float_precision,
++        )
+         if solver_type == 'GMRES':
+             self.logger.warning('GMRES is not usually used for heat equation')
+         self._makeAttributeAndRegister('nu', localVars=locals(), readOnly=True)
+@@ -100,32 +113,36 @@ class heatNd_unforced(GenericNDimFinDiff):
+                 f'{type(self).__name__} uses an analytic exact solution from t=0. If you try to compute the local error, you will get the global error instead!'
+             )
+ 
+-        ndim, freq, nu, sigma, dx, sol = self.ndim, self.freq, self.nu, self.sigma, self.dx, self.u_init
++        dtype = self.float_precision
++        t = dtype.type(t)
++        pi = dtype.type(np.pi)
++        ndim, freq, nu, sigma, dx, sol = self.ndim, self.freq, dtype.type(self.nu), self.sigma, self.dx, self.u_init
+ 
+         if ndim == 1:
+             x = self.grids
+-            rho = (2.0 - 2.0 * np.cos(np.pi * freq[0] * dx)) / dx**2
++            rho = (dtype.type(2.0) - dtype.type(2.0) * np.cos(pi * dtype.type(freq[0]) * dx)) / dx**2
+             if freq[0] > 0:
+-                sol[:] = np.sin(np.pi * freq[0] * x) * np.exp(-t * nu * rho)
++                sol[:] = np.sin(pi * dtype.type(freq[0]) * x) * np.exp(-t * nu * rho)
+             elif freq[0] == -1:  # Gaussian
+-                sol[:] = np.exp(-0.5 * ((x - 0.5) / sigma) ** 2) * np.exp(-t * nu * rho)
++                sigma = dtype.type(sigma)
++                sol[:] = np.exp(-dtype.type(0.5) * ((x - dtype.type(0.5)) / sigma) ** 2) * np.exp(-t * nu * rho)
+         elif ndim == 2:
+-            rho = (2.0 - 2.0 * np.cos(np.pi * freq[0] * dx)) / dx**2 + (
+-                2.0 - 2.0 * np.cos(np.pi * freq[1] * dx)
++            rho = (dtype.type(2.0) - dtype.type(2.0) * np.cos(pi * dtype.type(freq[0]) * dx)) / dx**2 + (
++                dtype.type(2.0) - dtype.type(2.0) * np.cos(pi * dtype.type(freq[1]) * dx)
+             ) / dx**2
+             x, y = self.grids
+-            sol[:] = np.sin(np.pi * freq[0] * x) * np.sin(np.pi * freq[1] * y) * np.exp(-t * nu * rho)
++            sol[:] = np.sin(pi * dtype.type(freq[0]) * x) * np.sin(pi * dtype.type(freq[1]) * y) * np.exp(-t * nu * rho)
+         elif ndim == 3:
+             rho = (
+-                (2.0 - 2.0 * np.cos(np.pi * freq[0] * dx)) / dx**2
+-                + (2.0 - 2.0 * np.cos(np.pi * freq[1] * dx))
+-                + (2.0 - 2.0 * np.cos(np.pi * freq[2] * dx)) / dx**2
++                (dtype.type(2.0) - dtype.type(2.0) * np.cos(pi * dtype.type(freq[0]) * dx)) / dx**2
++                + (dtype.type(2.0) - dtype.type(2.0) * np.cos(pi * dtype.type(freq[1]) * dx))
++                + (dtype.type(2.0) - dtype.type(2.0) * np.cos(pi * dtype.type(freq[2]) * dx)) / dx**2
+             )
+             x, y, z = self.grids
+             sol[:] = (
+-                np.sin(np.pi * freq[0] * x)
+-                * np.sin(np.pi * freq[1] * y)
+-                * np.sin(np.pi * freq[2] * z)
++                np.sin(pi * dtype.type(freq[0]) * x)
++                * np.sin(pi * dtype.type(freq[1]) * y)
++                * np.sin(pi * dtype.type(freq[2]) * z)
+                 * np.exp(-t * nu * rho)
+             )
+ 
+@@ -179,26 +196,32 @@ class heatNd_forced(heatNd_unforced):
+         f = self.f_init
+         f.impl[:] = self.A.dot(u.flatten()).reshape(self.nvars)
+ 
+-        ndim, freq, nu = self.ndim, self.freq, self.nu
++        dtype = self.float_precision
++        t = dtype.type(t)
++        pi = dtype.type(np.pi)
++        ndim, freq, nu = self.ndim, self.freq, dtype.type(self.nu)
+         if ndim == 1:
+             x = self.grids
+-            f.expl[:] = np.sin(np.pi * freq[0] * x) * (
+-                nu * np.pi**2 * sum([freq**2 for freq in freq]) * np.cos(t) - np.sin(t)
++            freq_sq_sum = dtype.type(sum([freq_i**2 for freq_i in freq]))
++            f.expl[:] = np.sin(pi * dtype.type(freq[0]) * x) * (
++                nu * pi**2 * freq_sq_sum * np.cos(t) - np.sin(t)
+             )
+         elif ndim == 2:
+             x, y = self.grids
++            freq_sq_sum = dtype.type(sum([freq_i**2 for freq_i in freq]))
+             f.expl[:] = (
+-                np.sin(np.pi * freq[0] * x)
+-                * np.sin(np.pi * freq[1] * y)
+-                * (nu * np.pi**2 * sum([freq**2 for freq in freq]) * np.cos(t) - np.sin(t))
++                np.sin(pi * dtype.type(freq[0]) * x)
++                * np.sin(pi * dtype.type(freq[1]) * y)
++                * (nu * pi**2 * freq_sq_sum * np.cos(t) - np.sin(t))
+             )
+         elif ndim == 3:
+             x, y, z = self.grids
++            freq_sq_sum = dtype.type(sum([freq_i**2 for freq_i in freq]))
+             f.expl[:] = (
+-                np.sin(np.pi * freq[0] * x)
+-                * np.sin(np.pi * freq[1] * y)
+-                * np.sin(np.pi * freq[2] * z)
+-                * (nu * np.pi**2 * sum([freq**2 for freq in freq]) * np.cos(t) - np.sin(t))
++                np.sin(pi * dtype.type(freq[0]) * x)
++                * np.sin(pi * dtype.type(freq[1]) * y)
++                * np.sin(pi * dtype.type(freq[2]) * z)
++                * (nu * pi**2 * freq_sq_sum * np.cos(t) - np.sin(t))
+             )
+ 
+         return f
+@@ -217,14 +240,22 @@ class heatNd_forced(heatNd_unforced):
+         sol : dtype_u
+             The exact solution.
+         """
++        dtype = self.float_precision
++        t = dtype.type(t)
++        pi = dtype.type(np.pi)
+         ndim, freq, sol = self.ndim, self.freq, self.u_init
+         if ndim == 1:
+             x = self.grids
+-            sol[:] = np.sin(np.pi * freq[0] * x) * np.cos(t)
++            sol[:] = np.sin(pi * dtype.type(freq[0]) * x) * np.cos(t)
+         elif ndim == 2:
+             x, y = self.grids
+-            sol[:] = np.sin(np.pi * freq[0] * x) * np.sin(np.pi * freq[1] * y) * np.cos(t)
++            sol[:] = np.sin(pi * dtype.type(freq[0]) * x) * np.sin(pi * dtype.type(freq[1]) * y) * np.cos(t)
+         elif ndim == 3:
+             x, y, z = self.grids
+-            sol[:] = np.sin(np.pi * freq[0] * x) * np.sin(np.pi * freq[1] * y) * np.sin(np.pi * freq[2] * z) * np.cos(t)
++            sol[:] = (
++                np.sin(pi * dtype.type(freq[0]) * x)
++                * np.sin(pi * dtype.type(freq[1]) * y)
++                * np.sin(pi * dtype.type(freq[2]) * z)
++                * np.cos(t)
++            )
+         return sol
+diff --git a/pySDC/implementations/problem_classes/generic_ND_FD.py b/pySDC/implementations/problem_classes/generic_ND_FD.py
+index da5b50675..93fbf9a44 100644
+--- a/pySDC/implementations/problem_classes/generic_ND_FD.py
++++ b/pySDC/implementations/problem_classes/generic_ND_FD.py
+@@ -94,7 +94,10 @@ class GenericNDimFinDiff(Problem):
+         solver_type='direct',
+         bc='periodic',
+         bcParams=None,
++        float_precision=np.dtype('float64'),
+     ):
++        float_precision = np.dtype(float_precision)
++
+         # make sure parameters have the correct types
+         if type(nvars) not in [int, tuple]:
+             raise ProblemError('nvars should be either tuple or int')
+@@ -133,9 +136,15 @@ class GenericNDimFinDiff(Problem):
+             raise ProblemError('need a square domain, got %s' % nvars)
+ 
+         # invoke super init, passing number of dofs
+-        super().__init__(init=(nvars[0] if ndim == 1 else nvars, None, np.dtype('float64')))
++        super().__init__(init=(nvars[0] if ndim == 1 else nvars, None, float_precision), float_precision=float_precision)
+ 
+-        dx, xvalues = problem_helper.get_1d_grid(size=nvars[0], bc=bc, left_boundary=0.0, right_boundary=1.0)
++        dx, xvalues = problem_helper.get_1d_grid(
++            size=nvars[0],
++            bc=bc,
++            left_boundary=0.0,
++            right_boundary=1.0,
++            float_precision=float_precision,
++        )
+ 
+         self.A, _ = problem_helper.get_finite_difference_matrix(
+             derivative=derivative,
+@@ -145,14 +154,17 @@ class GenericNDimFinDiff(Problem):
+             size=nvars[0],
+             dim=ndim,
+             bc=bc,
++            float_precision=float_precision,
+         )
+         self.A *= coeff
+ 
+         self.xvalues = xvalues
+-        self.Id = sp.eye(np.prod(nvars), format='csc')
++        self.Id = sp.eye(np.prod(nvars), format='csc', dtype=float_precision)
+ 
+         # store attribute and register them as parameters
+-        self._makeAttributeAndRegister('nvars', 'stencil_type', 'order', 'bc', localVars=locals(), readOnly=True)
++        self._makeAttributeAndRegister(
++            'nvars', 'stencil_type', 'order', 'bc', 'float_precision', localVars=locals(), readOnly=True
++        )
+         self._makeAttributeAndRegister('freq', 'lintol', 'liniter', 'solver_type', localVars=locals())
+ 
+         if self.solver_type != 'direct':
+@@ -235,30 +247,35 @@ class GenericNDimFinDiff(Problem):
+             self.u_init,
+         )
+ 
+-        if solver_type == 'direct':
+-            sol[:] = spsolve(Id - factor * A, rhs.flatten()).reshape(nvars)
+-        elif solver_type == 'GMRES':
+-            sol[:] = gmres(
+-                Id - factor * A,
+-                rhs.flatten(),
+-                x0=u0.flatten(),
+-                rtol=lintol,
+-                maxiter=liniter,
+-                atol=0,
+-                callback=self.work_counters[solver_type],
+-                callback_type='legacy',
+-            )[0].reshape(nvars)
+-        elif solver_type == 'CG':
+-            sol[:] = cg(
+-                Id - factor * A,
+-                rhs.flatten(),
+-                x0=u0.flatten(),
+-                rtol=lintol,
+-                maxiter=liniter,
+-                atol=0,
+-                callback=self.work_counters[solver_type],
+-            )[0].reshape(nvars)
+-        else:
+-            raise ValueError(f'solver type "{solver_type}" not known in generic advection-diffusion implementation!')
++        try:
++            if solver_type == 'direct':
++                sol[:] = spsolve(Id - factor * A, rhs.flatten()).reshape(nvars)
++            elif solver_type == 'GMRES':
++                sol[:] = gmres(
++                    Id - factor * A,
++                    rhs.flatten(),
++                    x0=u0.flatten(),
++                    rtol=lintol,
++                    maxiter=liniter,
++                    atol=0,
++                    callback=self.work_counters[solver_type],
++                    callback_type='legacy',
++                )[0].reshape(nvars)
++            elif solver_type == 'CG':
++                sol[:] = cg(
++                    Id - factor * A,
++                    rhs.flatten(),
++                    x0=u0.flatten(),
++                    rtol=lintol,
++                    maxiter=liniter,
++                    atol=0,
++                    callback=self.work_counters[solver_type],
++                )[0].reshape(nvars)
++            else:
++                raise ValueError(f'solver type "{solver_type}" not known in generic advection-diffusion implementation!')
++        except TypeError as err:
++            raise TypeError(
++                f'linear solver {solver_type} does not support float precision {self.float_precision.name}'
++            ) from err
+ 
+         return sol
+diff --git a/pySDC/implementations/sweeper_classes/imex_1st_order.py b/pySDC/implementations/sweeper_classes/imex_1st_order.py
+index da21c02e5..04b91086e 100644
+--- a/pySDC/implementations/sweeper_classes/imex_1st_order.py
++++ b/pySDC/implementations/sweeper_classes/imex_1st_order.py
+@@ -30,9 +30,11 @@ class imex_1st_order(Sweeper):
+ 
+         super().__init__(params, level)
+ 
++        dtype = self.params.float_precision
++
+         # IMEX integration matrices
+-        self.QI = self.get_Qdelta_implicit(qd_type=self.params.QI)
+-        self.QE = self.get_Qdelta_explicit(qd_type=self.params.QE)
++        self.QI = self.get_Qdelta_implicit(qd_type=self.params.QI).astype(dtype, copy=False)
++        self.QE = self.get_Qdelta_explicit(qd_type=self.params.QE).astype(dtype, copy=False)
+ 
+     def integrate(self):
+         """

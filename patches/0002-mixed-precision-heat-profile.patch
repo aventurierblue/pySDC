@@ -1,0 +1,297 @@
+diff --git a/pySDC/tests/test_collocation.py b/pySDC/tests/test_collocation.py
+index 236d409a9..dafdcc289 100644
+--- a/pySDC/tests/test_collocation.py
++++ b/pySDC/tests/test_collocation.py
+@@ -118,3 +118,14 @@ def test_partialquadraturewithS(nNodes, nodeType, quadType):
+             + ", partial quadrature rule from Smat failed to integrate polynomial of degree M-1 exactly for M = "
+             + str(M)
+         )
++
++
++@pytest.mark.base
++def test_float_precision_dtype():
++    coll = CollBase(3, 0.0, 1.0, node_type='LEGENDRE', quad_type='RADAU-RIGHT', float_precision=np.dtype('float32'))
++
++    assert coll.nodes.dtype == np.dtype('float32')
++    assert coll.weights.dtype == np.dtype('float32')
++    assert coll.Qmat.dtype == np.dtype('float32')
++    assert coll.Smat.dtype == np.dtype('float32')
++    assert coll.delta_m.dtype == np.dtype('float32')
+diff --git a/pySDC/projects/ir/basic_profile.py b/pySDC/projects/ir/basic_profile.py
+new file mode 100644
+index 000000000..1268982d3
+--- /dev/null
++++ b/pySDC/projects/ir/basic_profile.py
+@@ -0,0 +1,223 @@
++import argparse
++import numpy as np
++from time import perf_counter
++
++from pySDC.core.step import Step
++from pySDC.implementations.problem_classes.HeatEquation_ND_FD import heatNd_forced
++from pySDC.implementations.sweeper_classes.imex_1st_order import imex_1st_order
++
++
++def get_supported_precisions():
++    return {
++        'float32': np.dtype('float32'),
++        'float64': np.dtype('float64'),
++        #'float128': np.dtype(np.longdouble),
++    }
++
++
++def main(t0=0.1, t_end=0.2, steps=1, float_precision='float64', compare_precisions=False):
++    """
++    A simple profiling script to run IMEX SDC for multiple time steps.
++    """
++    if t_end <= t0:
++        raise ValueError("t_end needs to be larger than t0")
++
++    if steps != int(steps) or steps < 1:
++        raise ValueError("steps needs to be a positive integer")
++
++    steps = int(steps)
++    supported_precisions = get_supported_precisions()
++
++    if compare_precisions:
++        results = []
++        for precision_name in supported_precisions:
++            try:
++                results.append(run_configuration(t0, t_end, steps, supported_precisions[precision_name], precision_name))
++            except Exception as err:
++                results.append({'precision': precision_name, 'error': str(err)})
++
++        print_results_table(results)
++        return results
++
++    try:
++        dtype = supported_precisions[float_precision]
++    except KeyError as err:
++        raise ValueError(
++            f"Unknown precision {float_precision!r}. Choose from {', '.join(supported_precisions.keys())}"
++        ) from err
++
++    result = run_configuration(t0, t_end, steps, dtype, float_precision)
++    print_single_result(result)
++    return result
++
++
++def run_configuration(t0, t_end, steps, float_precision, precision_name):
++    dt = float_precision.type((t_end - t0) / steps)
++
++    # initialize level parameters
++    level_params = dict()
++    level_params['restol'] = np.max(np.r_[10E-5, 1000 * np.finfo(float_precision).eps])
++    level_params['dt'] = dt
++
++    # initialize sweeper parameters
++    sweeper_params = dict()
++    sweeper_params['quad_type'] = 'RADAU-RIGHT'
++    sweeper_params['num_nodes'] = 3
++    sweeper_params['float_precision'] = float_precision
++
++    # initialize problem parameters
++    problem_params = dict()
++    problem_params['nu'] = 0.1  # diffusion coefficient
++    problem_params['freq'] = 4  # frequency for the test value
++    problem_params['nvars'] = 1023  # number of degrees of freedom
++    problem_params['bc'] = 'dirichlet-zero'  # boundary conditions
++    problem_params['float_precision'] = float_precision
++
++    # initialize step parameters
++    step_params = dict()
++    step_params['maxiter'] = 50
++
++    # Fill description dictionary for easy hierarchy creation
++    description = dict()
++    description['problem_class'] = heatNd_forced
++    description['problem_params'] = problem_params
++    description['sweeper_class'] = imex_1st_order
++    description['sweeper_params'] = sweeper_params
++    description['level_params'] = level_params
++    description['step_params'] = step_params
++
++    # instantiate the step we are going to work on
++    S = Step(description=description)
++
++    # run IMEX SDC for the requested time interval
++    start_time = perf_counter()
++    err, res, total_niter, converged = run_imex_sdc(S, t0=t0, t_end=t_end, steps=steps)
++    elapsed = perf_counter() - start_time
++
++    return {
++        'precision': precision_name,
++        'dtype': str(float_precision),
++        'elapsed': elapsed,
++        'avg_step_time': elapsed / steps,
++        'err': err,
++        'res': res,
++        'total_niter': total_niter,
++        'steps': steps,
++        'restol': level_params['restol'],
++        'converged': converged,
++    }
++
++
++def print_single_result(result):
++    print(f"Precision: {result['precision']} ({result['dtype']})")
++    print(f"Elapsed time for {result['steps']} SDC time steps: {result['elapsed']:.6f} seconds")
++    print(f"Average time per SDC time step: {result['avg_step_time']:.6f} seconds")
++    print('Error and residual: %12.8e -- %12.8e' % (result['err'], result['res']))
++    print(f"Total iterations: {result['total_niter']}")
++    print(f"Residual tolerance: {result['restol']:.6e}")
++    print(f"Converged: {result['converged']}")
++
++
++def print_results_table(results):
++    print("precision    avg_step_time[s]   total_time[s]      error         residual      iterations   status")
++    for result in results:
++        if 'error' in result:
++            print(f"{result['precision']:<12}{'-':>16}   {'-':>13}   {'-':>12}   {'-':>12}   {'-':>10}   {result['error']}")
++            continue
++
++        print(
++            f"{result['precision']:<12}"
++            f"{result['avg_step_time']:>16.6e}   "
++            f"{result['elapsed']:>13.6e}   "
++            f"{result['err']:>12.6e}   "
++            f"{result['res']:>12.6e}   "
++            f"{result['total_niter']:>10}   {'ok' if result['converged'] else 'stalled'}"
++        )
++
++
++def parse_args():
++    parser = argparse.ArgumentParser(description="Profile IMEX SDC for the heat equation over multiple timesteps.")
++    parser.add_argument("--t0", type=float, default=0.1, help="Initial time")
++    parser.add_argument("--t-end", dest="t_end", type=float, default=0.2, help="Final time")
++    parser.add_argument("--steps", type=int, default=10, help="Number of timesteps between t0 and t_end")
++    parser.add_argument(
++        "--float-precision",
++        choices=tuple(get_supported_precisions().keys()),
++        default='float64',
++        help="Floating-point precision for the IMEX-SDC heat solve",
++    )
++    parser.add_argument(
++        "--compare-precisions",
++        action='store_true',
++        help="Run the same heat solve with all supported precisions and print a comparison table",
++    )
++    return parser.parse_args()
++
++
++def run_imex_sdc(S, t0, t_end, steps):
++    """
++    Routine to run IMEX SDC on multiple time steps.
++
++    Args:
++        S: an instance of a step representing the time step
++        t0: start time
++        t_end: end time
++        steps: number of time steps
++
++    Returns:
++        the error of SDC vs. exact solution at the final time
++        the residual after the last SDC sweep
++        the total number of iterations over all time steps
++        whether all steps converged to the requested tolerance
++    """
++    # make shortcuts for the level and the problem
++    L = S.levels[0]
++    P = L.prob
++
++    u_current = P.u_exact(t0)
++    total_niter = 0
++    last_residual = None
++    converged = True
++
++    for step_index in np.arange(steps):
++        current_time = t0 + step_index * L.dt
++
++        S.reset_step()
++        S.init_step(u_current)
++
++        L.status.time = current_time
++
++        # if we don't do this, the values at the nodes are not initialized
++        L.sweep.predict()
++        L.sweep.compute_residual()
++
++        S.status.iter = 0
++        while S.status.iter < S.params.maxiter and L.status.residual > L.params.restol:
++            L.sweep.update_nodes()
++            L.sweep.compute_residual()
++            S.status.iter += 1
++
++        if L.status.residual > L.params.restol:
++            converged = False
++
++        L.sweep.compute_end_point()
++
++        u_current = P.dtype_u(L.uend)
++        total_niter += S.status.iter
++        last_residual = L.status.residual
++
++    uex = P.u_exact(t_end)
++    err = np.linalg.norm(uex - u_current, np.inf)
++
++    return err, last_residual, total_niter, converged
++
++
++if __name__ == "__main__":
++    args = parse_args()
++    main(
++        t0=args.t0,
++        t_end=args.t_end,
++        steps=args.steps,
++        float_precision=args.float_precision,
++        compare_precisions=args.compare_precisions,
++    )
+diff --git a/pySDC/tests/test_problems/test_heat_equation_precision.py b/pySDC/tests/test_problems/test_heat_equation_precision.py
+new file mode 100644
+index 000000000..6f7cb92e8
+--- /dev/null
++++ b/pySDC/tests/test_problems/test_heat_equation_precision.py
+@@ -0,0 +1,43 @@
++import numpy as np
++import pytest
++
++
++@pytest.mark.base
++@pytest.mark.parametrize('precision', [np.dtype('float32'), np.dtype('float64')])
++def test_heat_equation_respects_float_precision(precision):
++    from pySDC.implementations.problem_classes.HeatEquation_ND_FD import heatNd_forced
++
++    problem = heatNd_forced(
++        nvars=31,
++        nu=0.1,
++        freq=4,
++        bc='dirichlet-zero',
++        float_precision=precision,
++    )
++
++    u = problem.u_exact(precision.type(0.1))
++    f = problem.eval_f(u, precision.type(0.1))
++    u_sol = problem.solve_system(problem.dtype_u(u), precision.type(0.05), u, precision.type(0.1))
++
++    assert problem.float_precision == precision
++    assert problem.xvalues.dtype == precision
++    assert problem.A.dtype == precision
++    assert problem.Id.dtype == precision
++    assert u.dtype == precision
++    assert f.impl.dtype == precision
++    assert f.expl.dtype == precision
++    assert u_sol.dtype == precision
++
++
++@pytest.mark.base
++def test_heat_equation_unsupported_high_precision_raises():
++    from pySDC.implementations.problem_classes.HeatEquation_ND_FD import heatNd_forced
++
++    with pytest.raises(TypeError, match='does not support float128'):
++        heatNd_forced(
++            nvars=31,
++            nu=0.1,
++            freq=4,
++            bc='dirichlet-zero',
++            float_precision=np.dtype(np.longdouble),
++        )

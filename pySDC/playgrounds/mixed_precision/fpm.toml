@@ -1,0 +1,7 @@
+name = "mixed_precision_fortran"
+version = "0.1.0"
+license = "MIT"
+author = "OpenCode"
+maintainer = "OpenCode"
+copyright = "2026"
+description = "Fortran implementations of SDC-Newton and Newton-SDC for Auzinger and Allen-Cahn"

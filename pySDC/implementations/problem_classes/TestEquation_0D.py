@@ -157,6 +157,60 @@ class testequation0d(Problem):
         return u.flatten()
 
 
+class real_scalar_testequation0d(Problem):
+    r"""
+    Real-valued scalar test equation
+
+    .. math::
+        \frac{du(t)}{dt} = \lambda u(t), \qquad u(0)=u_0.
+
+    This class is meant for precision studies of scalar SDC and IR-SDC variants.
+    It keeps the datatype real and follows the ``float_precision`` requested by the
+    surrounding pySDC step description.
+    """
+
+    dtype_u = mesh
+    dtype_f = mesh
+
+    def __init__(self, lam=-20.0, u0=1.0, float_precision=np.dtype('float64')):
+        float_precision = np.dtype(float_precision)
+        lam = float_precision.type(lam)
+        u0 = float_precision.type(u0)
+
+        super().__init__((1, None, float_precision), float_precision=float_precision)
+        self._makeAttributeAndRegister('lam', 'u0', 'float_precision', localVars=locals(), readOnly=True)
+        self.work_counters['rhs'] = WorkCounter()
+        self.work_counters['solve'] = WorkCounter()
+
+    def eval_f(self, u, t):
+        f = self.dtype_f(self.init)
+        f[:] = self.lam * u
+        self.work_counters['rhs']()
+        return f
+
+    def solve_system(self, rhs, factor, u0, t):
+        me = self.dtype_u(self.init)
+        denom = self.float_precision.type(1.0) - self.float_precision.type(factor) * self.lam
+        me[:] = rhs
+        me /= denom
+        self.work_counters['solve']()
+        return me
+
+    def u_exact(self, t, u_init=None, t_init=None):
+        t_init = 0.0 if t_init is None else t_init * 1.0
+
+        if u_init is None:
+            base = self.dtype_u(self.init)
+            base[:] = self.u0
+        else:
+            base = self.dtype_u(u_init)
+
+        me = self.dtype_u(self.init)
+        growth = np.exp(self.float_precision.type(t - t_init) * self.lam)
+        me[:] = base * growth
+        return me
+
+
 class test_equation_IMEX(Problem):
     dtype_f = imex_mesh
     dtype_u = mesh
