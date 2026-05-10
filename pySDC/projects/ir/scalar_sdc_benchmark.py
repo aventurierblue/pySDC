@@ -15,7 +15,6 @@ import numpy as np
 from pySDC.core.step import Step
 from pySDC.implementations.problem_classes.TestEquation_0D import real_scalar_testequation0d
 from pySDC.implementations.sweeper_classes.generic_implicit import generic_implicit
-from pySDC.projects.Resilience.sweepers import generic_implicit_efficient
 from pySDC.projects.ir.sweepers import generic_implicit_ir
 
 
@@ -26,7 +25,7 @@ def get_supported_precisions():
     }
 
 
-def make_description(float_precision, dt, num_nodes, restol, maxiter, efficient=True):
+def make_description(float_precision, dt, num_nodes, restol, maxiter):
     level_params = {
         'restol': restol,
         'dt': float_precision.type(dt),
@@ -54,7 +53,7 @@ def make_description(float_precision, dt, num_nodes, restol, maxiter, efficient=
     description = {
         'problem_class': real_scalar_testequation0d,
         'problem_params': problem_params,
-        'sweeper_class': generic_implicit_efficient if efficient else generic_implicit,
+        'sweeper_class': generic_implicit,
         'sweeper_params': sweeper_params,
         'level_params': level_params,
         'step_params': step_params,
@@ -109,7 +108,7 @@ def make_ir_description(
     }
 
 
-def run_plain_sdc(t0, t_end, steps, float_precision, num_nodes, restol, maxiter, efficient=True):
+def run_plain_sdc(t0, t_end, steps, float_precision, num_nodes, restol, maxiter):
     dt = float_precision.type((t_end - t0) / steps)
     description = make_description(
         float_precision=float_precision,
@@ -117,7 +116,6 @@ def run_plain_sdc(t0, t_end, steps, float_precision, num_nodes, restol, maxiter,
         num_nodes=num_nodes,
         restol=restol,
         maxiter=maxiter,
-        efficient=efficient,
     )
     S = Step(description=description)
     L = S.levels[0]
@@ -170,7 +168,16 @@ def run_plain_sdc(t0, t_end, steps, float_precision, num_nodes, restol, maxiter,
     }
 
 
-def run_ir_sdc(t0, t_end, steps, num_nodes, outer_tol, inner_tol, outer_maxiter=50, inner_maxiter=5):
+def run_ir_sdc(
+    t0,
+    t_end,
+    steps,
+    num_nodes,
+    outer_tol,
+    inner_tol,
+    outer_maxiter=50,
+    inner_maxiter=5,
+):
     dt = np.float64((t_end - t0) / steps)
     description = make_ir_description(
         dt=dt,
@@ -259,7 +266,6 @@ def make_benchmark_step(method, dt, num_nodes, tol, maxiter=50, inner_maxiter=5)
                 num_nodes=num_nodes,
                 restol=tol,
                 maxiter=maxiter,
-                efficient=True,
             )
         )
 
@@ -271,7 +277,6 @@ def make_benchmark_step(method, dt, num_nodes, tol, maxiter=50, inner_maxiter=5)
                 num_nodes=num_nodes,
                 restol=tol,
                 maxiter=maxiter,
-                efficient=True,
             )
         )
 
@@ -467,7 +472,6 @@ def benchmark_configuration(
                 num_nodes=num_nodes,
                 restol=tol,
                 maxiter=maxiter,
-                efficient=True,
             )
         elif method == 'plain-fp32':
             result = run_plain_sdc(
@@ -478,7 +482,6 @@ def benchmark_configuration(
                 num_nodes=num_nodes,
                 restol=tol,
                 maxiter=maxiter,
-                efficient=True,
             )
         elif method == 'ir-sdc':
             result = run_ir_sdc(
@@ -643,7 +646,7 @@ def parse_args():
     parser.add_argument('--t0', type=float, default=0.0, help='Initial time')
     parser.add_argument('--t-end', dest='t_end', type=float, default=5.0, help='Final time')
     parser.add_argument('--steps', type=int, default=500, help='Number of timesteps')
-    parser.add_argument('--num-nodes', dest='num_nodes', type=int, default=7, help='Number of collocation nodes')
+    parser.add_argument('--num-nodes', dest='num_nodes', type=int, default=3, help='Number of collocation nodes')
     parser.add_argument('--target-tol', dest='target_tol', type=float, default=1e-9, help='Target stopping tolerance')
     parser.add_argument('--maxiter', '--max-iter', dest='maxiter', type=int, default=50, help='Maximum outer sweeps')
     parser.add_argument(

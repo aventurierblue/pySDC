@@ -22,7 +22,6 @@ def build_reference_solution(t0, t_end, reference_steps, num_nodes, tol, maxiter
         num_nodes=num_nodes,
         restol=tol,
         maxiter=maxiter,
-        efficient=True,
     )
     endpoint_value = float(reference['endpoint_values'][-1])
     exact_endpoint_value = float(reference['exact_endpoint_values'][-1])
@@ -57,9 +56,10 @@ def run_convergence_study(
         tol=reference_tol,
         maxiter=reference_maxiter,
     )
-
+    print("reference ready")
     results = []
     for steps in sorted(step_counts):
+        print(steps)
         plain = run_plain_sdc(
             t0=t0,
             t_end=t_end,
@@ -68,7 +68,6 @@ def run_convergence_study(
             num_nodes=num_nodes,
             restol=tol,
             maxiter=maxiter,
-            efficient=True,
         )
         ir = run_ir_sdc(
             t0=t0,
@@ -188,7 +187,7 @@ def parse_args():
         '--reference-steps',
         dest='reference_steps',
         type=int,
-        default=500000,
+        default=5000000,
         help='Timestep count for the fine plain fp64 reference solution',
     )
     parser.add_argument(
@@ -198,7 +197,7 @@ def parse_args():
         default=None,
         help='Reference timestep size for the fine plain fp64 solution. Overrides --reference-steps.',
     )
-    parser.add_argument('--num-nodes', dest='num_nodes', type=int, default=7, help='Number of collocation nodes')
+    parser.add_argument('--num-nodes', dest='num_nodes', type=int, default=3, help='Number of collocation nodes')
     parser.add_argument('--tol', type=float, default=1e-12, help='Stopping tolerance for both methods')
     parser.add_argument('--maxiter', '--max-iter', dest='maxiter', type=int, default=50, help='Maximum outer sweeps')
     parser.add_argument(

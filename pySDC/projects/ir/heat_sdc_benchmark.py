@@ -12,7 +12,6 @@ import matplotlib.pyplot as plt
 from pySDC.core.step import Step
 from pySDC.implementations.problem_classes.HeatEquation_ND_FD import heatNd_unforced
 from pySDC.implementations.sweeper_classes.generic_implicit import generic_implicit
-from pySDC.projects.Resilience.sweepers import generic_implicit_efficient
 from pySDC.projects.ir.scalar_sdc_benchmark import (
     collect_reachable_arrays,
     get_snapshot_bytes,
@@ -20,7 +19,7 @@ from pySDC.projects.ir.scalar_sdc_benchmark import (
 from pySDC.projects.ir.sweepers import generic_implicit_ir
 
 
-def make_heat_description(float_precision, dt, num_nodes, restol, maxiter, efficient=True, nvars=31, nu=0.1, freq=2):
+def make_heat_description(float_precision, dt, num_nodes, restol, maxiter, nvars=31, nu=0.1, freq=2):
     return {
         'problem_class': heatNd_unforced,
         'problem_params': {
@@ -30,7 +29,7 @@ def make_heat_description(float_precision, dt, num_nodes, restol, maxiter, effic
             'bc': 'dirichlet-zero',
             'float_precision': float_precision,
         },
-        'sweeper_class': generic_implicit_efficient if efficient else generic_implicit,
+        'sweeper_class': generic_implicit,
         'sweeper_params': {
             'quad_type': 'RADAU-RIGHT',
             'num_nodes': num_nodes,
@@ -103,7 +102,6 @@ def run_heat_plain_sdc(
     num_nodes,
     restol,
     maxiter,
-    efficient=True,
     nvars=31,
     nu=0.1,
     freq=2,
@@ -115,7 +113,6 @@ def run_heat_plain_sdc(
         num_nodes=num_nodes,
         restol=restol,
         maxiter=maxiter,
-        efficient=efficient,
         nvars=nvars,
         nu=nu,
         freq=freq,
@@ -281,7 +278,6 @@ def make_heat_benchmark_step(method, dt, num_nodes, tol, maxiter=50, inner_maxit
                 num_nodes=num_nodes,
                 restol=tol,
                 maxiter=maxiter,
-                efficient=True,
                 nvars=nvars,
                 nu=nu,
                 freq=freq,
@@ -296,7 +292,6 @@ def make_heat_benchmark_step(method, dt, num_nodes, tol, maxiter=50, inner_maxit
                 num_nodes=num_nodes,
                 restol=tol,
                 maxiter=maxiter,
-                efficient=True,
                 nvars=nvars,
                 nu=nu,
                 freq=freq,
@@ -439,7 +434,6 @@ def benchmark_heat_configuration(
                 num_nodes=num_nodes,
                 restol=tol,
                 maxiter=maxiter,
-                efficient=True,
                 nvars=nvars,
                 nu=nu,
                 freq=freq,
@@ -453,7 +447,6 @@ def benchmark_heat_configuration(
                 num_nodes=num_nodes,
                 restol=tol,
                 maxiter=maxiter,
-                efficient=True,
                 nvars=nvars,
                 nu=nu,
                 freq=freq,
