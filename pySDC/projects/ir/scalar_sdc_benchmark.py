@@ -68,7 +68,7 @@ def make_ir_description(
     outer_maxiter,
     inner_tol,
     inner_maxiter,
-    use_scalar_fast_path=True,
+    use_scalar_fast_path=False,
 ):
     level_params = {
         'restol': outer_tol,
@@ -535,8 +535,6 @@ def create_memory_time_plot(output_path, benchmarks, target_tol):
     axes[1].set_title('Memory')
 
     fig.suptitle(f'Scalar SDC comparison at target tolerance {target_tol:g}')
-    text_lines = [f"{entry['method']}: error={err:.2e}" for entry, err in zip(benchmarks, errors, strict=True)]
-    fig.text(0.5, -0.02, ' | '.join(text_lines), ha='center', va='top', fontsize=9)
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)

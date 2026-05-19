@@ -15,10 +15,10 @@ from pySDC.core.step import Step
 from pySDC.implementations.problem_classes.GeneralizedFisher_1D_FD_implicit import generalized_fisher
 from pySDC.implementations.sweeper_classes.generic_implicit import generic_implicit
 from pySDC.projects.ir.scalar_sdc_benchmark import collect_reachable_arrays, get_snapshot_bytes
-from pySDC.projects.ir.sweepers import generic_implicit_newton_sdc_ir
+from pySDC.projects.ir.sweepers import generic_implicit_newton_sdc, generic_implicit_newton_sdc_ir
 
 
-METHODS = ('plain-fp64', 'gmres-ir')
+METHODS = ('newton-sdc-fp64', 'newton-sdc-ir')
 
 
 def make_plain_description(dt, num_nodes, restol, maxiter, nvars, nu, lambda0):
@@ -29,7 +29,7 @@ def make_plain_description(dt, num_nodes, restol, maxiter, nvars, nu, lambda0):
             'nu': nu,
             'lambda0': lambda0,
             'newton_maxiter': 60,
-            'newton_tol': 1e-10,
+            'newton_tol': 1e-9,
             'float_precision': np.dtype('float64'),
         },
         'sweeper_class': generic_implicit,
@@ -70,7 +70,7 @@ def make_gmres_ir_description(
             'nu': nu,
             'lambda0': lambda0,
             'newton_maxiter': 60,
-            'newton_tol': 1e-10,
+            'newton_tol': 1e-9,
             'float_precision': np.dtype('float64'),
         },
         'sweeper_class': generic_implicit_newton_sdc_ir,
@@ -78,20 +78,17 @@ def make_gmres_ir_description(
             'quad_type': 'RADAU-RIGHT',
             'num_nodes': num_nodes,
             'QI': 'LU',
-            'inner_QI': inner_qi,
+            'inner_QI': inner_qi, 
             'initial_guess': 'spread',
             'float_precision': np.dtype('float64'),
             'inner_float_precision': np.dtype('float32'),
             'inner_solver': inner_solver,
             'adaptive_inner': True,
-            'inner_eta_scale': 0.01,
-            'inner_eta_power': 1.5,
-            'inner_tol_floor': 1e-5,
-            'inner_tol_ceiling': 1e-2,
-            'inner_maxiter': 20,
-            'gmres_maxiter': 20,
-            'gmres_restart': 20,
-            'inner_tol': 1e-10,
+            'inner_tol_floor': None if inner_solver == 'sdc' else 5e-5,
+            'inner_maxiter': 1000,
+            'gmres_maxiter': 100,
+            'gmres_restart': 100,
+            'inner_tol': 1e-8,
             'preconditioner_solver': 'splu',
             'gmres_warm_start': True,
             'cache_inner_step': cache_inner_step,
@@ -105,6 +102,62 @@ def make_gmres_ir_description(
             'maxiter': outer_maxiter,
         },
     }
+
+
+def make_newton_sdc_ir_description(
+    dt,
+    num_nodes,
+    outer_tol,
+    outer_maxiter,
+    nvars,
+    nu,
+    lambda0,
+    inner_solver='gmres',
+    inner_qi='LU',
+    cache_inner_step=False,
+):
+    return make_gmres_ir_description(
+        dt=dt,
+        num_nodes=num_nodes,
+        outer_tol=outer_tol,
+        outer_maxiter=outer_maxiter,
+        nvars=nvars,
+        nu=nu,
+        lambda0=lambda0,
+        inner_solver=inner_solver,
+        inner_qi=inner_qi,
+        cache_inner_step=cache_inner_step,
+    )
+
+
+def make_newton_sdc_fp64_description(
+    dt,
+    num_nodes,
+    outer_tol,
+    outer_maxiter,
+    nvars,
+    nu,
+    lambda0,
+    inner_solver='gmres',
+    inner_qi='LU',
+    cache_inner_step=False,
+):
+    description = make_newton_sdc_ir_description(
+        dt=dt,
+        num_nodes=num_nodes,
+        outer_tol=outer_tol,
+        outer_maxiter=outer_maxiter,
+        nvars=nvars,
+        nu=nu,
+        lambda0=lambda0,
+        inner_solver=inner_solver,
+        inner_qi=inner_qi,
+        cache_inner_step=cache_inner_step,
+    )
+    description['sweeper_class'] = generic_implicit_newton_sdc
+    description['sweeper_params'] = dict(description['sweeper_params'])
+    description['sweeper_params']['inner_float_precision'] = np.dtype('float64')
+    return description
 
 
 def _run_method(description, t0, t_end, steps, method):
@@ -260,15 +313,38 @@ def profile_algorithm_memory(description):
     return result
 
 
-def benchmark_configuration(method, t0, t_end, steps, num_nodes, tol, maxiter, nvars, nu, lambda0, repeats=2):
+def benchmark_configuration(
+    method,
+    t0,
+    t_end,
+    steps,
+    num_nodes,
+    tol,
+    maxiter,
+    nvars,
+    nu,
+    lambda0,
+    inner_solver='gmres',
+    inner_qi='LU',
+    cache_inner_step=False,
+    repeats=2,
+):
     dt = (t_end - t0) / steps
     best = None
     memory_description = None
     for _ in range(repeats):
-        description = (
-            make_plain_description(dt=dt, num_nodes=num_nodes, restol=tol, maxiter=maxiter, nvars=nvars, nu=nu, lambda0=lambda0)
-            if method == 'plain-fp64'
-            else make_gmres_ir_description(
+        if method == 'plain-fp64':
+            description = make_plain_description(
+                dt=dt,
+                num_nodes=num_nodes,
+                restol=tol,
+                maxiter=maxiter,
+                nvars=nvars,
+                nu=nu,
+                lambda0=lambda0,
+            )
+        elif method == 'newton-sdc-fp64':
+            description = make_newton_sdc_fp64_description(
                 dt=dt,
                 num_nodes=num_nodes,
                 outer_tol=tol,
@@ -276,8 +352,26 @@ def benchmark_configuration(method, t0, t_end, steps, num_nodes, tol, maxiter, n
                 nvars=nvars,
                 nu=nu,
                 lambda0=lambda0,
+                inner_solver=inner_solver,
+                inner_qi=inner_qi,
+                cache_inner_step=cache_inner_step,
             )
-        )
+        elif method in ('gmres-ir', 'newton-sdc-ir'):
+            description = make_newton_sdc_ir_description(
+                dt=dt,
+                num_nodes=num_nodes,
+                outer_tol=tol,
+                outer_maxiter=maxiter,
+                nvars=nvars,
+                nu=nu,
+                lambda0=lambda0,
+                inner_solver=inner_solver,
+                inner_qi=inner_qi,
+                cache_inner_step=cache_inner_step,
+            )
+        else:
+            raise ValueError(f'Unknown method {method}')
+
         memory_description = description
         result = _run_method(description, t0, t_end, steps, method)
         if best is None or result['elapsed'] < best['elapsed']:
@@ -293,8 +387,8 @@ def benchmark_configuration(method, t0, t_end, steps, num_nodes, tol, maxiter, n
 def create_time_error_plot(output_path, benchmarks, t0, t_end):
     fig, ax = plt.subplots(figsize=(8.6, 5.4), constrained_layout=True)
     styles = {
-        'plain-fp64': {'color': 'tab:blue', 'marker': 'o'},
-        'gmres-ir': {'color': 'tab:pink', 'marker': 'P'},
+        'newton-sdc-fp64': {'color': 'tab:blue', 'marker': 'o'},
+        'newton-sdc-ir': {'color': 'tab:pink', 'marker': 'P'},
     }
 
     for entry in benchmarks:
@@ -308,7 +402,7 @@ def create_time_error_plot(output_path, benchmarks, t0, t_end):
 
     ax.set_xlabel('Time')
     ax.set_ylabel('Endpoint error per step')
-    ax.set_title(f'Fisher fp64 vs gmres-ir on [{t0:g}, {t_end:.6g}]')
+    ax.set_title(f'Fisher Newton-SDC fp64 vs fp64/32 on [{t0:g}, {t_end:.6g}]')
     ax.grid(True, which='both', alpha=0.3)
     ax.legend(loc='best')
 
@@ -343,16 +437,16 @@ def create_memory_time_plot(output_path, benchmarks, target_tol):
     plt.close(fig)
 
 
-def print_results(benchmarks, t0, t_end, steps, num_nodes, target_tol, maxiter, nvars):
-    print('Fisher benchmark: fp64 generic_implicit vs Newton-SDC gmres-ir')
+def print_results(benchmarks, t0, t_end, steps, num_nodes, target_tol, maxiter, nvars, inner_solver, inner_qi):
+    print('Fisher benchmark: Newton-SDC fp64 vs Newton-SDC IR fp64/32')
     print(
         f't0={t0}, t_end={t_end}, steps={steps}, num_nodes={num_nodes}, '
-        f'nvars={nvars}, target_tol={target_tol}, maxiter={maxiter}'
+        f'nvars={nvars}, target_tol={target_tol}, maxiter={maxiter}, inner_solver={inner_solver}, inner_qi={inner_qi}'
     )
-    print('method        avg_step_time[s]   total_time[s]      end_error       residual        outer_it   inner_it   mem[KiB]   peak[KiB]   status')
+    print('method              avg_step_time[s]   total_time[s]      end_error       residual        outer_it   inner_it   mem[KiB]   peak[KiB]   status')
     for entry in benchmarks:
         print(
-            f"{entry['method']:<12}"
+            f"{entry['method']:<18}"
             f"{entry['avg_step_time']:>16.6e}   "
             f"{entry['elapsed']:>13.6e}   "
             f"{entry['endpoint_error']:>12.6e}   "
@@ -364,23 +458,36 @@ def print_results(benchmarks, t0, t_end, steps, num_nodes, target_tol, maxiter, 
             f"{'ok' if entry['converged'] else 'stalled'}"
         )
 
-    plain = next(entry for entry in benchmarks if entry['method'] == 'plain-fp64')
-    gmres = next(entry for entry in benchmarks if entry['method'] == 'gmres-ir')
-    speedup = plain['elapsed'] / gmres['elapsed'] if gmres['elapsed'] > 0.0 else np.inf
-    print(f'plain-fp64 endpoint error = {plain["endpoint_error"]:.6e}')
-    print(f'gmres-ir endpoint error   = {gmres["endpoint_error"]:.6e}')
-    print(f'gmres-ir speedup vs plain = {speedup:.3f}x')
+    fp64 = next(entry for entry in benchmarks if entry['method'] == 'newton-sdc-fp64')
+    ir = next(entry for entry in benchmarks if entry['method'] == 'newton-sdc-ir')
+    speedup = fp64['elapsed'] / ir['elapsed'] if ir['elapsed'] > 0.0 else np.inf
+    print(f'newton-sdc-fp64 endpoint error = {fp64["endpoint_error"]:.6e}')
+    print(f'newton-sdc-ir endpoint error   = {ir["endpoint_error"]:.6e}')
+    print(f'newton-sdc-ir speedup vs fp64  = {speedup:.3f}x')
     print(
-        f'plain-fp64 memory         = {plain["memory_bytes"] / 1024.0:.3f} KiB retained, '
-        f'{plain["memory_peak_bytes"] / 1024.0:.3f} KiB peak traced'
+        f'newton-sdc-fp64 memory    = {fp64["memory_bytes"] / 1024.0:.3f} KiB retained, '
+        f'{fp64["memory_peak_bytes"] / 1024.0:.3f} KiB peak traced'
     )
     print(
-        f'gmres-ir memory           = {gmres["memory_bytes"] / 1024.0:.3f} KiB retained, '
-        f'{gmres["memory_peak_bytes"] / 1024.0:.3f} KiB peak traced'
+        f'newton-sdc-ir memory      = {ir["memory_bytes"] / 1024.0:.3f} KiB retained, '
+        f'{ir["memory_peak_bytes"] / 1024.0:.3f} KiB peak traced'
     )
 
 
-def main(t0=0.0, t_end=1.0, steps=32, num_nodes=3, target_tol=1e-8, maxiter=20, nvars=255, nu=1.0, lambda0=2.0):
+def main(
+    t0=0.0,
+    t_end=1.0,
+    steps=32,
+    num_nodes=3,
+    target_tol=1e-8,
+    maxiter=20,
+    nvars=2047,
+    nu=1.0,
+    lambda0=2.0,
+    inner_solver='gmres',
+    inner_qi='LU',
+    cache_inner_step=False,
+):
     benchmarks = [
         benchmark_configuration(
             method=method,
@@ -393,6 +500,9 @@ def main(t0=0.0, t_end=1.0, steps=32, num_nodes=3, target_tol=1e-8, maxiter=20, 
             nvars=nvars,
             nu=nu,
             lambda0=lambda0,
+            inner_solver=inner_solver,
+            inner_qi=inner_qi,
+            cache_inner_step=cache_inner_step,
             repeats=2,
         )
         for method in METHODS
@@ -403,22 +513,27 @@ def main(t0=0.0, t_end=1.0, steps=32, num_nodes=3, target_tol=1e-8, maxiter=20, 
     memory_output_path = images_dir / 'fisher_fp64_vs_gmres_ir_memory_time.png'
     create_time_error_plot(output_path, benchmarks, t0, t_end)
     create_memory_time_plot(memory_output_path, benchmarks, target_tol)
-    print_results(benchmarks, t0, t_end, steps, num_nodes, target_tol, maxiter, nvars)
+    print_results(benchmarks, t0, t_end, steps, num_nodes, target_tol, maxiter, nvars, inner_solver, inner_qi)
     print(f'Wrote {output_path}')
     print(f'Wrote {memory_output_path}')
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Compare fp64 generic_implicit against mixed-precision Newton-SDC IR on generalized Fisher.')
+    parser = argparse.ArgumentParser(
+        description='Compare full-fp64 Newton-SDC against mixed-precision Newton-SDC IR on generalized Fisher.'
+    )
     parser.add_argument('--t0', type=float, default=0.0, help='Initial time')
     parser.add_argument('--t-end', dest='t_end', type=float, default=1.0, help='Final time')
     parser.add_argument('--steps', type=int, default=32, help='Number of time steps')
-    parser.add_argument('--num-nodes', dest='num_nodes', type=int, default=4, help='Number of collocation nodes')
-    parser.add_argument('--target-tol', dest='target_tol', type=float, default=1e-9, help='Target stopping tolerance')
+    parser.add_argument('--num-nodes', dest='num_nodes', type=int, default=5, help='Number of collocation nodes')
+    parser.add_argument('--target-tol', dest='target_tol', type=float, default=1e-8, help='Target stopping tolerance')
     parser.add_argument('--maxiter', type=int, default=20, help='Maximum outer iterations per step')
-    parser.add_argument('--nvars', type=int, default=127, help='Spatial resolution')
+    parser.add_argument('--nvars', type=int, default=2047, help='Spatial resolution')
     parser.add_argument('--nu', type=float, default=1.0, help='Fisher nonlinearity parameter')
     parser.add_argument('--lambda0', type=float, default=2.0, help='Fisher lambda0 parameter')
+    parser.add_argument('--inner-solver', dest='inner_solver', choices=('direct', 'gmres', 'lgmres', 'fgmres', 'sdc'), default='gmres', help='Inner Newton-SDC solver')
+    parser.add_argument('--inner-qi', dest='inner_qi', default='LU', help='Inner Newton-SDC preconditioner')
+    parser.add_argument('--cache-inner-step', dest='cache_inner_step', action='store_true', help='Reuse inner Newton-SDC work buffers')
     return parser.parse_args()
 
 
@@ -434,4 +549,7 @@ if __name__ == '__main__':
         nvars=args.nvars,
         nu=args.nu,
         lambda0=args.lambda0,
+        inner_solver=args.inner_solver,
+        inner_qi=args.inner_qi,
+        cache_inner_step=args.cache_inner_step,
     )

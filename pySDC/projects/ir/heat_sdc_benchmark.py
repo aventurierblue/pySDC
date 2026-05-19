@@ -650,7 +650,7 @@ def parse_args():
     parser.add_argument('--t0', type=float, default=0.0, help='Initial time')
     parser.add_argument('--t-end', dest='t_end', type=float, default=5, help='Final time')
     parser.add_argument('--steps', type=int, default=100, help='Number of timesteps')
-    parser.add_argument('--num-nodes', dest='num_nodes', type=int, default=4, help='Number of collocation nodes')
+    parser.add_argument('--num-nodes', dest='num_nodes', type=int, default=5, help='Number of collocation nodes')
     parser.add_argument('--target-tol', dest='target_tol', type=float, default=1e-9, help='Target stopping tolerance')
     parser.add_argument('--maxiter', '--max-iter', dest='maxiter', type=int, default=50, help='Maximum outer sweeps')
     parser.add_argument(

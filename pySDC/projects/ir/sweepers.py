@@ -109,6 +109,7 @@ class _InnerCorrectionData:
 class _NewtonInnerCorrectionData:
     def __init__(self, sweeper):
         self.sweeper = sweeper
+        self._uses_krylov_solver = sweeper.params.inner_solver in ('gmres', 'lgmres', 'fgmres')
         outer_problem = sweeper.level.prob
         if not hasattr(outer_problem, 'eval_jacobian'):
             raise TypeError(f'{type(outer_problem).__name__} does not implement eval_jacobian')
@@ -134,16 +135,27 @@ class _NewtonInnerCorrectionData:
         self.block_size = int(np.prod(self.block_shape))
         self._sparse_identity = sp.eye(self.block_size, format='csc', dtype=self.problem.float_precision)
 
-        # Reuse GMRES work buffers across matvec and preconditioner calls.
-        self._gmres_rhs = np.zeros(self.num_nodes * self.block_size, dtype=self.problem.float_precision)
-        self._gmres_x0 = np.zeros(self.num_nodes * self.block_size, dtype=self.problem.float_precision)
-        self._gmres_matvec_blocks_in = [self.problem.dtype_u(self.problem.init, val=0.0) for _ in range(self.num_nodes)]
-        self._gmres_matvec_blocks_out = [self.problem.dtype_u(self.problem.init, val=0.0) for _ in range(self.num_nodes)]
-        self._gmres_matvec_jacobian_products = [self.problem.dtype_u(self.problem.init, val=0.0) for _ in range(self.num_nodes)]
-        self._gmres_precond_blocks_rhs = [self.problem.dtype_u(self.problem.init, val=0.0) for _ in range(self.num_nodes)]
-        self._gmres_precond_blocks_out = [self.problem.dtype_u(self.problem.init, val=0.0) for _ in range(self.num_nodes + 1)]
-        self._gmres_matvec_out = np.zeros(self.num_nodes * self.block_size, dtype=self.problem.float_precision)
-        self._gmres_precond_out = np.zeros(self.num_nodes * self.block_size, dtype=self.problem.float_precision)
+        if self._uses_krylov_solver:
+            # Reuse Krylov work buffers across matvec and preconditioner calls.
+            self._gmres_rhs = np.zeros(self.num_nodes * self.block_size, dtype=self.problem.float_precision)
+            self._gmres_x0 = np.zeros(self.num_nodes * self.block_size, dtype=self.problem.float_precision)
+            self._gmres_matvec_blocks_in = [self.problem.dtype_u(self.problem.init, val=0.0) for _ in range(self.num_nodes)]
+            self._gmres_matvec_blocks_out = [self.problem.dtype_u(self.problem.init, val=0.0) for _ in range(self.num_nodes)]
+            self._gmres_matvec_jacobian_products = [self.problem.dtype_u(self.problem.init, val=0.0) for _ in range(self.num_nodes)]
+            self._gmres_precond_blocks_rhs = [self.problem.dtype_u(self.problem.init, val=0.0) for _ in range(self.num_nodes)]
+            self._gmres_precond_blocks_out = [self.problem.dtype_u(self.problem.init, val=0.0) for _ in range(self.num_nodes + 1)]
+            self._gmres_matvec_out = np.zeros(self.num_nodes * self.block_size, dtype=self.problem.float_precision)
+            self._gmres_precond_out = np.zeros(self.num_nodes * self.block_size, dtype=self.problem.float_precision)
+        else:
+            self._gmres_rhs = np.zeros(self.num_nodes * self.block_size, dtype=self.problem.float_precision)
+            self._gmres_x0 = None
+            self._gmres_matvec_blocks_in = None
+            self._gmres_matvec_blocks_out = None
+            self._gmres_matvec_jacobian_products = None
+            self._gmres_precond_blocks_rhs = None
+            self._gmres_precond_blocks_out = None
+            self._gmres_matvec_out = None
+            self._gmres_precond_out = None
 
     @staticmethod
     def _cast_jacobian(jacobian, dtype):
@@ -189,13 +201,8 @@ class _NewtonInnerCorrectionData:
                 self.linear_systems[m] = system
                 self.linear_system_solvers[m] = self._build_sparse_solver(system, m)
             else:
-                jacobian_array = np.asarray(jacobian, dtype=problem_dtype)
-                if jacobian_array.ndim == 2:
-                    self.linear_systems[m] = np.eye(jacobian_array.shape[0], dtype=problem_dtype) - factor * jacobian_array
-                    self.linear_system_solvers[m] = None
-                else:
-                    self.linear_systems[m] = None
-                    self.linear_system_solvers[m] = None
+                self.linear_systems[m] = None
+                self.linear_system_solvers[m] = None
 
     def _build_sparse_solver(self, system, node_index):
         solver_type = getattr(self.sweeper.params, 'preconditioner_solver', 'cg')
@@ -224,9 +231,6 @@ class _NewtonInnerCorrectionData:
         rhs_vec = rhs.view(np.ndarray).reshape(-1)
         system = self.linear_systems[node_index]
         solver = self.linear_system_solvers[node_index]
-        if isinstance(system, np.ndarray):
-            out[:] = np.linalg.solve(system, rhs_vec).reshape(out.shape)
-            return out
 
         if solver is not None:
             out_view = out.view(np.ndarray)
@@ -331,6 +335,8 @@ class generic_implicit_ir(generic_implicit):
         params.setdefault('inner_float_precision', np.dtype('float32'))
         params.setdefault('inner_maxiter', 5)
         params.setdefault('inner_tol', 1e-9)
+        params.setdefault('inner_tol_floor', None)
+        params.setdefault('adaptive_inner', True)
         params.setdefault('use_scalar_fast_path', True)
         params.setdefault('cache_inner_step', True)
         super().__init__(params, level)
@@ -492,6 +498,12 @@ class generic_implicit_ir(generic_implicit):
             inner_data.solve_system_into(inner_data.u[m + 1], rhs, dt_inner * inner_data.qi[m + 1, m + 1], node_time)
             inner_data.eval_f_into(inner_data.f[m + 1], inner_data.u[m + 1], node_time)
 
+    def _get_inner_target_tol(self):
+        target = float(self.params.inner_tol)
+        if self.params.adaptive_inner and self.params.inner_tol_floor is not None:
+            target = max(float(self.params.inner_tol_floor), target)
+        return float(target)
+
     def _is_scalar_linear_test_equation(self):
         if not self.params.use_scalar_fast_path:
             return False
@@ -645,10 +657,11 @@ class generic_implicit_ir(generic_implicit):
             self._initialize_inner_correction(inner_data, outer_residuals)
             dt_inner = self.inner_float_precision.type(L.dt)
             time_inner = self.inner_float_precision.type(L.time)
+            inner_target_tol = self._get_inner_target_tol()
 
             self.last_inner_iterations = 0
             inner_residual = self._compute_inner_correction_residual(inner_data, dt_inner)
-            while self.last_inner_iterations < self.params.inner_maxiter and inner_residual > self.params.inner_tol:
+            while self.last_inner_iterations < self.params.inner_maxiter and inner_residual > inner_target_tol:
                 self._perform_inner_correction_sweep(inner_data, dt_inner, time_inner)
                 self.last_inner_iterations += 1
                 inner_residual = self._compute_inner_correction_residual(inner_data, dt_inner)
@@ -685,11 +698,12 @@ class generic_implicit_ir(generic_implicit):
 
         correction_inner = np.zeros(self.coll.num_nodes, dtype=self.inner_float_precision)
         self.last_inner_iterations = 0
+        inner_target_tol = self._get_inner_target_tol()
 
         for _ in range(self.params.inner_maxiter):
             inner_rhs = rhs_inner + z_inner * (q_diff_inner @ correction_inner)
             inner_residual = inner_rhs - p_inner @ correction_inner
-            if float(np.max(np.abs(inner_residual.astype(np.float64)))) <= self.params.inner_tol:
+            if float(np.max(np.abs(inner_residual.astype(np.float64)))) <= inner_target_tol:
                 break
 
             correction_inner = np.asarray(np.linalg.solve(p_inner, inner_rhs), dtype=self.inner_float_precision)
@@ -721,9 +735,6 @@ class generic_implicit_newton_sdc_ir(generic_implicit_ir):
         params.setdefault('inner_maxiter', 20)
         params.setdefault('inner_tol', 1e-9)
         params.setdefault('inner_tol_floor', None)
-        params.setdefault('inner_tol_ceiling', None)
-        params.setdefault('inner_eta_scale', 0.01)
-        params.setdefault('inner_eta_power', 1.5)
         params.setdefault('adaptive_inner', True)
         params.setdefault('inner_solver', 'gmres')
         params.setdefault('inner_QI', None)
@@ -896,7 +907,7 @@ class generic_implicit_newton_sdc_ir(generic_implicit_ir):
             maxiter=self.params.gmres_maxiter if self.params.gmres_maxiter is not None else self.params.inner_maxiter,
             M=preconditioner,
             callback=callback,
-            inner_m=self.params.gmres_restart,
+            inner_m=self.params.gmres_restart if self.params.gmres_restart is not None else 30,
         )
 
         self.last_inner_iterations = counter['iters']
@@ -914,43 +925,31 @@ class generic_implicit_newton_sdc_ir(generic_implicit_ir):
 
     def _solve_newton_inner_direct(self, inner_data, dt_inner):
         ncomp = inner_data.block_size
-        size = inner_data.num_nodes * ncomp
         dtype = self.inner_float_precision
 
         rhs = inner_data._gmres_rhs
         for m in range(inner_data.num_nodes):
             rhs[m * ncomp : (m + 1) * ncomp] = inner_data.tau[m].view(np.ndarray).reshape(-1)
 
-        all_sparse = all(sp.issparse(jacobian) for jacobian in inner_data.jacobians)
-        if all_sparse:
-            identity = sp.eye(ncomp, format='csc', dtype=dtype)
-            blocks = []
-            for m in range(inner_data.num_nodes):
-                row = []
-                for j in range(inner_data.num_nodes):
-                    block = -dt_inner * inner_data.qmat[m + 1, j + 1] * inner_data.jacobians[j]
-                    if m == j:
-                        block = identity + block
-                    row.append(block)
-                blocks.append(row)
-            system = sp.bmat(blocks, format='csc')
-            solution = np.asarray(spsolve(system, rhs), dtype=dtype)
-        else:
-            system = np.zeros((size, size), dtype=dtype)
-            identity = np.eye(ncomp, dtype=dtype)
-            for m in range(inner_data.num_nodes):
-                row_slice = slice(m * ncomp, (m + 1) * ncomp)
-                for j in range(inner_data.num_nodes):
-                    col_slice = slice(j * ncomp, (j + 1) * ncomp)
-                    jacobian = inner_data.jacobians[j]
-                    if sp.issparse(jacobian):
-                        jacobian_block = jacobian.toarray()
-                    else:
-                        jacobian_block = np.asarray(jacobian, dtype=dtype)
-                    system[row_slice, col_slice] = -dt_inner * inner_data.qmat[m + 1, j + 1] * jacobian_block
-                    if m == j:
-                        system[row_slice, col_slice] += identity
-            solution = np.linalg.solve(system, rhs)
+        sparse_jacobians = []
+        for jacobian in inner_data.jacobians:
+            if sp.issparse(jacobian):
+                sparse_jacobians.append(jacobian.astype(dtype))
+            else:
+                sparse_jacobians.append(sp.csc_matrix(np.asarray(jacobian, dtype=dtype)))
+
+        identity = sp.eye(ncomp, format='csc', dtype=dtype)
+        blocks = []
+        for m in range(inner_data.num_nodes):
+            row = []
+            for j in range(inner_data.num_nodes):
+                block = -dt_inner * inner_data.qmat[m + 1, j + 1] * sparse_jacobians[j]
+                if m == j:
+                    block = identity + block
+                row.append(block)
+            blocks.append(row)
+        system = sp.bmat(blocks, format='csc')
+        solution = np.asarray(spsolve(system, rhs), dtype=dtype)
 
         self.last_inner_iterations = 1
 
@@ -961,17 +960,9 @@ class generic_implicit_newton_sdc_ir(generic_implicit_ir):
         return 0.0
 
     def _get_inner_target_tol(self, outer_residual):
-        if not self.params.adaptive_inner:
-            return float(self.params.inner_tol)
-
-        eta = float(self.params.inner_eta_scale) * float(outer_residual) ** float(self.params.inner_eta_power)
-        target = min(float(self.params.inner_tol), eta)
-
-        if self.params.inner_tol_floor is not None:
+        target = float(self.params.inner_tol)
+        if self.params.adaptive_inner and self.params.inner_tol_floor is not None:
             target = max(float(self.params.inner_tol_floor), target)
-        if self.params.inner_tol_ceiling is not None:
-            target = min(float(self.params.inner_tol_ceiling), target)
-
         return float(target)
 
     def update_nodes(self):
@@ -1025,3 +1016,24 @@ class generic_implicit_newton_sdc_ir(generic_implicit_ir):
 
         L.status.updated = True
         return None
+
+
+class generic_implicit_newton_sdc(generic_implicit_newton_sdc_ir):
+    """
+    Full-precision Newton-SDC sweeper for nonlinear collocation problems.
+
+    This reuses the Newton-SDC implementation of
+    ``generic_implicit_newton_sdc_ir`` but keeps the inner linearized correction
+    solve in the same precision as the outer collocation state by default.
+    """
+
+    def __init__(self, params, level):
+        params = dict(params)
+        outer_float_precision = np.dtype(
+            params.get(
+                'float_precision',
+                getattr(getattr(level, 'prob', None), 'float_precision', np.dtype('float64')),
+            )
+        )
+        params['inner_float_precision'] = outer_float_precision
+        super().__init__(params, level)

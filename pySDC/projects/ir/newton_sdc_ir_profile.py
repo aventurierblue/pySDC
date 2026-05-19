@@ -5,7 +5,12 @@ from time import perf_counter
 import pstats
 
 from pySDC.core.step import Step
-from pySDC.projects.ir.allencahn_fp64_vs_newton_sdc_ir import make_gmres_ir_description, make_plain_description
+from pySDC.projects.ir.allencahn_fp64_vs_newton_sdc_ir import (
+    make_gmres_ir_description,
+    make_newton_sdc_fp64_description,
+    make_newton_sdc_ir_description,
+    make_plain_description,
+)
 
 
 def initialize_step(description, t0=0.0):
@@ -48,6 +53,28 @@ def run_outer_sweeps(step, outer_sweeps):
 
 
 def make_description(method, dt, num_nodes, target_tol, maxiter, nvars, eps, radius):
+    if method == 'newton-sdc-ir':
+        return make_newton_sdc_ir_description(
+            dt=dt,
+            num_nodes=num_nodes,
+            outer_tol=target_tol,
+            outer_maxiter=maxiter,
+            nvars=nvars,
+            eps=eps,
+            radius=radius,
+        )
+
+    if method == 'newton-sdc-fp64':
+        return make_newton_sdc_fp64_description(
+            dt=dt,
+            num_nodes=num_nodes,
+            outer_tol=target_tol,
+            outer_maxiter=maxiter,
+            nvars=nvars,
+            eps=eps,
+            radius=radius,
+        )
+
     if method == 'gmres-ir':
         return make_gmres_ir_description(
             dt=dt,
@@ -94,7 +121,12 @@ def profile_configuration(method, dt, outer_sweeps, num_nodes, target_tol, maxit
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Profile the Newton-SDC IR hot path on Allen-Cahn without plotting or reference solves.')
-    parser.add_argument('--method', choices=('gmres-ir', 'plain-fp64'), default='gmres-ir', help='Method to profile')
+    parser.add_argument(
+        '--method',
+        choices=('newton-sdc-ir', 'newton-sdc-fp64', 'gmres-ir', 'plain-fp64'),
+        default='newton-sdc-ir',
+        help='Method to profile',
+    )
     parser.add_argument('--dt', type=float, default=1e-3, help='Single-step timestep size')
     parser.add_argument('--outer-sweeps', type=int, default=2, help='Maximum outer sweeps to profile')
     parser.add_argument('--num-nodes', dest='num_nodes', type=int, default=3, help='Number of collocation nodes')
