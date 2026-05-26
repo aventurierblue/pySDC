@@ -5,6 +5,9 @@ from pySDC.implementations.problem_classes.Auzinger_implicit import auzinger
 from pySDC.projects.ir.sweepers import generic_implicit_newton_sdc_ir
 
 
+DEFAULT_INNER_ETA = 1e-3
+
+
 def run_auzinger_newton_sdc_ir(dt=0.1, outer_iterations=6, inner_iterations=2):
     description = {
         'problem_class': auzinger,
@@ -21,8 +24,11 @@ def run_auzinger_newton_sdc_ir(dt=0.1, outer_iterations=6, inner_iterations=2):
             'initial_guess': 'spread',
             'float_precision': np.dtype('float64'),
             'inner_float_precision': np.dtype('float32'),
+            'adaptive_inner': True,
+            'inner_eta': DEFAULT_INNER_ETA,
             'inner_maxiter': inner_iterations,
             'inner_tol': 1e-10,
+            'inner_tol_floor': 1e-10,
         },
         'level_params': {
             'restol': 1e-13,

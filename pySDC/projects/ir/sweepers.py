@@ -325,9 +325,9 @@ class generic_implicit_ir(generic_implicit):
 
     By default, the scalar linear test equation uses a specialized low-storage matrix
     path. For more general affine-linear implicit problems, or when
-    ``use_scalar_fast_path=False``, a temporary low-precision inner step is built on
-    the homogeneous correction problem, so the outer step does not retain additional
-    low-precision stage or operator state.
+    ``use_scalar_fast_path=False``, the sweeper reuses a cached low-precision inner
+    correction problem built on the homogeneous operator. Set
+    ``cache_inner_step=False`` to rebuild that inner state on demand instead.
     """
 
     def __init__(self, params, level):
@@ -335,9 +335,10 @@ class generic_implicit_ir(generic_implicit):
         params.setdefault('inner_float_precision', np.dtype('float32'))
         params.setdefault('inner_maxiter', 5)
         params.setdefault('inner_tol', 1e-9)
+        params.setdefault('inner_eta', None)
         params.setdefault('inner_tol_floor', None)
         params.setdefault('adaptive_inner', True)
-        params.setdefault('use_scalar_fast_path', True)
+        params.setdefault('use_scalar_fast_path', False)
         params.setdefault('cache_inner_step', True)
         super().__init__(params, level)
 
@@ -457,6 +458,9 @@ class generic_implicit_ir(generic_implicit):
             residual_view -= inner_data.u[m + 1].view(np.ndarray)
             residual_norms[m] = abs(residual)
 
+        return self._reduce_residual_norms(residual_norms)
+
+    def _reduce_residual_norms(self, residual_norms):
         residual_type = self.level.params.residual_type
         if residual_type == 'full_abs':
             return float(np.max(residual_norms))
@@ -498,10 +502,15 @@ class generic_implicit_ir(generic_implicit):
             inner_data.solve_system_into(inner_data.u[m + 1], rhs, dt_inner * inner_data.qi[m + 1, m + 1], node_time)
             inner_data.eval_f_into(inner_data.f[m + 1], inner_data.u[m + 1], node_time)
 
-    def _get_inner_target_tol(self):
+    def _get_inner_target_tol(self, outer_residual=None):
         target = float(self.params.inner_tol)
-        if self.params.adaptive_inner and self.params.inner_tol_floor is not None:
-            target = max(float(self.params.inner_tol_floor), target)
+        if self.params.adaptive_inner:
+            if outer_residual is None:
+                outer_residual = self.level.status.residual
+            if self.params.inner_eta is not None and outer_residual is not None:
+                target = float(self.params.inner_eta) * float(outer_residual)
+            if self.params.inner_tol_floor is not None:
+                target = max(float(self.params.inner_tol_floor), target)
         return float(target)
 
     def _is_scalar_linear_test_equation(self):
@@ -720,6 +729,105 @@ class generic_implicit_ir(generic_implicit):
         return None
 
 
+class generic_implicit_sdc_ir(generic_implicit_ir):
+    """
+    Mixed-precision linear SDC-IR sweeper with refinement inside one SDC sweep.
+
+    One call to ``update_nodes`` keeps the outer SDC sweep structure of
+    ``generic_implicit`` and applies iterative refinement only to the increment
+    equation ``M c = r``. The inner stopping criterion reuses the same
+    eta-based target selection as ``generic_implicit_ir``.
+    """
+
+    def _is_scalar_linear_test_equation(self):
+        # This variant intentionally uses only the generic inner correction path.
+        return False
+
+    def _initialize_inner_preconditioner_refinement(self, inner_data, outer_residuals):
+        if not hasattr(inner_data, 'delta_u'):
+            inner_data.delta_u = [inner_data.problem.dtype_u(inner_data.problem.init, val=0.0) for _ in range(inner_data.num_nodes + 1)]
+            inner_data.delta_f = [inner_data.problem.dtype_f(inner_data.problem.init, val=0.0) for _ in range(inner_data.num_nodes + 1)]
+
+        for m in range(inner_data.num_nodes + 1):
+            inner_data.u[m][:] = 0.0
+            inner_data.f[m][:] = 0.0
+            inner_data.delta_u[m][:] = 0.0
+            inner_data.delta_f[m][:] = 0.0
+
+        for m, residual in enumerate(outer_residuals):
+            inner_data.tau[m][:] = np.asarray(residual, dtype=inner_data.problem.float_precision)
+
+    def _compute_inner_preconditioner_residual(self, inner_data, dt_inner):
+        residual_norms = np.zeros(inner_data.num_nodes, dtype=np.float64)
+
+        for m in range(inner_data.num_nodes):
+            residual = inner_data.residuals[m]
+            residual_view = residual.view(np.ndarray)
+            np.copyto(residual_view, inner_data.tau[m].view(np.ndarray))
+            residual_view -= inner_data.u[m + 1].view(np.ndarray)
+            for j in range(1, m + 2):
+                residual_view += dt_inner * inner_data.qi[m + 1, j] * inner_data.f[j].view(np.ndarray)
+            residual_norms[m] = abs(residual)
+
+        return self._reduce_residual_norms(residual_norms)
+
+    def _perform_inner_preconditioner_refinement(self, inner_data, dt_inner, time_inner):
+        for m in range(inner_data.num_nodes):
+            rhs = inner_data.rhs[m]
+            rhs_view = rhs.view(np.ndarray)
+            np.copyto(rhs_view, inner_data.residuals[m].view(np.ndarray))
+            for j in range(1, m + 1):
+                rhs_view += dt_inner * inner_data.qi[m + 1, j] * inner_data.delta_f[j].view(np.ndarray)
+
+            node_time = time_inner + dt_inner * inner_data.nodes[m]
+            inner_data.solve_system_into(
+                inner_data.delta_u[m + 1], rhs, dt_inner * inner_data.qi[m + 1, m + 1], node_time
+            )
+            inner_data.eval_f_into(inner_data.delta_f[m + 1], inner_data.delta_u[m + 1], node_time)
+
+        for m in range(inner_data.num_nodes):
+            inner_data.u[m + 1].view(np.ndarray)[:] += inner_data.delta_u[m + 1].view(np.ndarray)
+            inner_data.f[m + 1].view(np.ndarray)[:] += inner_data.delta_f[m + 1].view(np.ndarray)
+
+    def update_nodes(self):
+        L = self.level
+        P = L.prob
+
+        assert L.status.unlocked
+
+        outer_residuals = self._compute_full_residuals()
+        inner_data = self._get_inner_correction_data()
+        self._initialize_inner_preconditioner_refinement(inner_data, outer_residuals)
+        dt_inner = self.inner_float_precision.type(L.dt)
+        time_inner = self.inner_float_precision.type(L.time)
+        inner_target_tol = self._get_inner_target_tol()
+
+        self.last_inner_iterations = 0
+        inner_residual = self._compute_inner_preconditioner_residual(inner_data, dt_inner)
+        while self.last_inner_iterations < self.params.inner_maxiter and inner_residual > inner_target_tol:
+            self._perform_inner_preconditioner_refinement(inner_data, dt_inner, time_inner)
+            self.last_inner_iterations += 1
+            inner_residual = self._compute_inner_preconditioner_residual(inner_data, dt_inner)
+
+        self.total_inner_iterations += self.last_inner_iterations
+
+        for m in range(self.coll.num_nodes):
+            if L.u[m + 1] is None:
+                L.u[m + 1] = P.dtype_u(P.init, val=0.0)
+            L.u[m + 1][:] += np.asarray(inner_data.u[m + 1], dtype=L.u[m + 1].dtype)
+            if self._uses_outer_rhs_shortcuts():
+                node_time = L.time + L.dt * self.coll.nodes[m]
+                if L.f[m + 1] is None:
+                    L.f[m + 1] = P.eval_f(L.u[m + 1], node_time)
+                else:
+                    L.f[m + 1][:] = P.eval_f(L.u[m + 1], node_time)
+            else:
+                L.f[m + 1] = None
+
+        L.status.updated = True
+        return None
+
+
 class generic_implicit_newton_sdc_ir(generic_implicit_ir):
     """
     Mixed-precision Newton-SDC iterative-refinement sweeper for nonlinear collocation problems.
@@ -734,6 +842,7 @@ class generic_implicit_newton_sdc_ir(generic_implicit_ir):
         params.setdefault('inner_float_precision', np.dtype('float32'))
         params.setdefault('inner_maxiter', 20)
         params.setdefault('inner_tol', 1e-9)
+        params.setdefault('inner_eta', None)
         params.setdefault('inner_tol_floor', None)
         params.setdefault('adaptive_inner', True)
         params.setdefault('inner_solver', 'gmres')
@@ -958,12 +1067,6 @@ class generic_implicit_newton_sdc_ir(generic_implicit_ir):
             inner_data.eval_jacobian_product_into(inner_data.f[m + 1], m, inner_data.u[m + 1])
 
         return 0.0
-
-    def _get_inner_target_tol(self, outer_residual):
-        target = float(self.params.inner_tol)
-        if self.params.adaptive_inner and self.params.inner_tol_floor is not None:
-            target = max(float(self.params.inner_tol_floor), target)
-        return float(target)
 
     def update_nodes(self):
         L = self.level

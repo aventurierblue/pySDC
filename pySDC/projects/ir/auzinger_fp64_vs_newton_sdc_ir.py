@@ -18,7 +18,7 @@ from pySDC.projects.ir.sweepers import generic_implicit_newton_sdc, generic_impl
 
 
 METHODS = ('newton-sdc-fp64', 'newton-sdc-ir')
-SDC_INNER_FORCING_ETA = 0.01
+DEFAULT_INNER_ETA = 1e-3
 
 
 def make_plain_description(dt, num_nodes, restol, maxiter):
@@ -75,6 +75,7 @@ def make_gmres_ir_description(
             'inner_float_precision': np.dtype('float32'),
             'inner_solver': inner_solver,
             'adaptive_inner': True,
+            'inner_eta': DEFAULT_INNER_ETA,
             'inner_tol_floor': None,
             'inner_maxiter': 100,
             'gmres_maxiter': 20,
@@ -170,8 +171,6 @@ def _run_method(description, t0, t_end, steps, method):
 
         step.status.iter = 0
         while step.status.iter < step.params.maxiter and level.status.residual > level.params.restol:
-            if getattr(level.sweep.params, 'inner_solver', None) == 'sdc':
-                _apply_sdc_inner_forcing(level)
             level.sweep.update_nodes()
             level.sweep.compute_residual()
             step.status.iter += 1
@@ -227,22 +226,10 @@ def _initialize_step_state(step, t0=0.0):
 
     level.sweep.predict()
     level.sweep.compute_residual()
-    if getattr(level.sweep.params, 'inner_solver', None) == 'sdc':
-        _apply_sdc_inner_forcing(level)
     level.sweep.update_nodes()
     level.sweep.compute_end_point()
 
     return step
-
-
-def _apply_sdc_inner_forcing(level):
-    sweep = level.sweep
-    if getattr(sweep.params, 'inner_solver', None) != 'sdc':
-        return
-    if level.status.residual is None:
-        return
-
-    sweep.params.inner_tol = SDC_INNER_FORCING_ETA * float(level.status.residual)
 
 
 def audit_algorithm_state_memory(description):
@@ -386,7 +373,7 @@ def create_time_error_plot(output_path, benchmarks, t0, t_end):
 def create_memory_time_plot(output_path, benchmarks, target_tol):
     labels = [entry['method'] for entry in benchmarks]
     times = [entry['elapsed'] * 1e3 for entry in benchmarks]
-    memories = [entry['memory_bytes'] / 1024.0 for entry in benchmarks]
+    memories = [entry['memory_peak_bytes'] / 1024.0 for entry in benchmarks]
     errors = [entry['endpoint_error'] for entry in benchmarks]
 
     fig, axes = plt.subplots(1, 2, figsize=(10, 4.2), constrained_layout=True)
@@ -397,12 +384,37 @@ def create_memory_time_plot(output_path, benchmarks, target_tol):
     axes[0].set_title('Runtime')
 
     axes[1].bar(labels, memories, color=colors)
-    axes[1].set_ylabel('Verified retained NumPy state [KiB]')
+    axes[1].set_ylabel('Peak traced memory [KiB]')
     axes[1].set_title('Memory')
 
     fig.suptitle(f'Auzinger comparison at target tolerance {target_tol:g}')
     text_lines = [f"{entry['method']}: error={err:.2e}" for entry, err in zip(benchmarks, errors, strict=True)]
     fig.text(0.5, -0.02, ' | '.join(text_lines), ha='center', va='top', fontsize=9)
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=200, bbox_inches='tight')
+    plt.close(fig)
+
+
+def create_inner_solver_runtime_plot(output_path, solver_benchmarks, target_tol):
+    labels = [entry['inner_solver'] for entry in solver_benchmarks]
+    fp64_times = [entry['newton-sdc-fp64']['elapsed'] * 1e3 for entry in solver_benchmarks]
+    ir_times = [entry['newton-sdc-ir']['elapsed'] * 1e3 for entry in solver_benchmarks]
+
+    x = np.arange(len(labels), dtype=np.float64)
+    width = 0.36
+
+    fig, ax = plt.subplots(figsize=(7.8, 4.6), constrained_layout=True)
+    ax.bar(x - width / 2, fp64_times, width, label='newton-sdc-fp64', color='tab:blue')
+    ax.bar(x + width / 2, ir_times, width, label='newton-sdc-ir', color='tab:pink')
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.set_ylabel('Time to solution [ms]')
+    ax.set_title(f'Auzinger runtime by inner solver at target tolerance {target_tol:g}')
+    ax.grid(True, axis='y', alpha=0.3)
+    ax.legend(loc='best')
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -457,6 +469,7 @@ def main(
     inner_solver='direct',
     inner_qi='LU',
     cache_inner_step=False,
+    compare_inner_solvers=(),
 ):
     benchmarks = [
         benchmark_configuration(
@@ -474,6 +487,41 @@ def main(
         )
         for method in METHODS
     ]
+    solver_benchmarks = None
+    if compare_inner_solvers:
+        solver_benchmarks = []
+        for solver in compare_inner_solvers:
+            solver_benchmarks.append(
+                {
+                    'inner_solver': solver,
+                    'newton-sdc-fp64': benchmark_configuration(
+                        method='newton-sdc-fp64',
+                        t0=t0,
+                        t_end=t_end,
+                        steps=steps,
+                        num_nodes=num_nodes,
+                        tol=target_tol,
+                        maxiter=maxiter,
+                        inner_solver=solver,
+                        inner_qi=inner_qi,
+                        cache_inner_step=cache_inner_step,
+                        repeats=2,
+                    ),
+                    'newton-sdc-ir': benchmark_configuration(
+                        method='newton-sdc-ir',
+                        t0=t0,
+                        t_end=t_end,
+                        steps=steps,
+                        num_nodes=num_nodes,
+                        tol=target_tol,
+                        maxiter=maxiter,
+                        inner_solver=solver,
+                        inner_qi=inner_qi,
+                        cache_inner_step=cache_inner_step,
+                        repeats=2,
+                    ),
+                }
+            )
 
     images_dir = Path(__file__).resolve().parents[3] / 'images'
     output_stem = f'auzinger_fp64_vs_{inner_solver}_ir'
@@ -481,9 +529,14 @@ def main(
     memory_output_path = images_dir / f'{output_stem}_memory_time.png'
     create_time_error_plot(output_path, benchmarks, t0, t_end)
     create_memory_time_plot(memory_output_path, benchmarks, target_tol)
+    if compare_inner_solvers:
+        solver_runtime_output_path = images_dir / 'auzinger_inner_solver_runtime_comparison.png'
+        create_inner_solver_runtime_plot(solver_runtime_output_path, solver_benchmarks, target_tol)
     print_results(benchmarks, t0, t_end, steps, num_nodes, target_tol, maxiter, inner_solver, inner_qi)
     print(f'Wrote {output_path}')
     print(f'Wrote {memory_output_path}')
+    if compare_inner_solvers:
+        print(f'Wrote {solver_runtime_output_path}')
 
 
 def parse_args():
@@ -492,13 +545,14 @@ def parse_args():
     )
     parser.add_argument('--t0', type=float, default=0.0, help='Initial time')
     parser.add_argument('--t-end', dest='t_end', type=float, default=4.0 * np.pi, help='Final time')
-    parser.add_argument('--steps', type=int, default=2000, help='Number of time steps')
+    parser.add_argument('--steps', type=int, default=200, help='Number of time steps')
     parser.add_argument('--num-nodes', dest='num_nodes', type=int, default=5, help='Number of collocation nodes')
     parser.add_argument('--target-tol', dest='target_tol', type=float, default=1e-10, help='Target stopping tolerance')
     parser.add_argument('--maxiter', type=int, default=50, help='Maximum outer iterations per step')
-    parser.add_argument('--inner-solver', dest='inner_solver', choices=('direct', 'gmres', 'lgmres', 'fgmres', 'sdc'), default='direct', help='Inner Newton-SDC solver')
+    parser.add_argument('--inner-solver', dest='inner_solver', choices=('direct', 'gmres', 'lgmres', 'fgmres', 'sdc'), default='sdc', help='Inner Newton-SDC solver')
     parser.add_argument('--inner-qi', dest='inner_qi', default='LU', help='Inner Newton-SDC preconditioner')
     parser.add_argument('--cache-inner-step', dest='cache_inner_step', action='store_true', help='Reuse inner Newton-SDC work buffers')
+    parser.add_argument('--compare-inner-solvers', dest='compare_inner_solvers', nargs='+', choices=('direct', 'sdc', 'gmres', 'lgmres', 'fgmres'), default=(), help='Inner solvers to benchmark additionally and include in the runtime comparison plot')
     return parser.parse_args()
 
 
@@ -514,4 +568,5 @@ if __name__ == '__main__':
         inner_solver=args.inner_solver,
         inner_qi=args.inner_qi,
         cache_inner_step=args.cache_inner_step,
+        compare_inner_solvers=args.compare_inner_solvers,
     )

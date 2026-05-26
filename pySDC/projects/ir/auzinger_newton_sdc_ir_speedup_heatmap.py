@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 
 from pySDC.core.problem import Problem
 from pySDC.implementations.datatype_classes.mesh import mesh
-from pySDC.projects.ir.auzinger_fp64_vs_newton_sdc_ir import _run_method
+from pySDC.projects.ir.auzinger_fp64_vs_newton_sdc_ir import DEFAULT_INNER_ETA, _run_method
 from pySDC.projects.ir.sweepers import generic_implicit_newton_sdc, generic_implicit_newton_sdc_ir
 
 
@@ -173,7 +173,8 @@ def make_newton_sdc_ir_description(
             'float_precision': np.dtype('float64'),
             'inner_float_precision': np.dtype('float32'),
             'inner_solver': inner_solver,
-            'adaptive_inner': False,
+            'adaptive_inner': True,
+            'inner_eta': DEFAULT_INNER_ETA,
             'inner_tol_floor': None,
             'inner_maxiter': 20,
             'gmres_maxiter': 20,

@@ -18,6 +18,7 @@ from pySDC.projects.ir.sweepers import generic_implicit_newton_sdc, generic_impl
 
 
 METHODS = ('newton-sdc-fp64', 'newton-sdc-ir')
+DEFAULT_INNER_ETA = 1e-3
 
 
 def make_plain_description(dt, num_nodes, restol, maxiter, nvars, eps, radius):
@@ -28,8 +29,8 @@ def make_plain_description(dt, num_nodes, restol, maxiter, nvars, eps, radius):
             'nu': 2,
             'eps': eps,
             'newton_maxiter': 100,
-            'newton_tol': 1e-9,
-            'lin_tol': 1e-9,
+            'newton_tol': 1e-11,
+            'lin_tol': 1e-11,
             'lin_maxiter': 200,
             'radius': radius,
             'float_precision': np.dtype('float64'),
@@ -71,9 +72,9 @@ def make_gmres_ir_description(
             'nvars': nvars,
             'nu': 2,
             'eps': eps,
-            'newton_maxiter': 100,
-            'newton_tol': 1e-10,
-            'lin_tol': 1e-6,
+            'newton_maxiter': 200,
+            'newton_tol': 1e-11,
+            'lin_tol': 1e-8,
             'lin_maxiter': 200,
             'radius': radius,
             'float_precision': np.dtype('float64'),
@@ -87,8 +88,9 @@ def make_gmres_ir_description(
             'initial_guess': 'spread',
             'float_precision': np.dtype('float64'),
             'inner_float_precision': np.dtype('float32'),
-            'inner_solver': 'sdc',
+            'inner_solver': inner_solver,
             'adaptive_inner': True,
+            'inner_eta': DEFAULT_INNER_ETA,
             'inner_tol_floor': 1e-5,
             'inner_maxiter': 50,
             'gmres_maxiter': 20,
@@ -122,8 +124,9 @@ def make_sdc_ir_description(dt, num_nodes, outer_tol, outer_maxiter, nvars, eps,
     )
     description['sweeper_params'].update(
         {
-            'adaptive_inner': False,
-            'inner_tol_floor': None,
+            'adaptive_inner': True,
+            'inner_eta': DEFAULT_INNER_ETA,
+            'inner_tol_floor': 1e-8,
             'inner_tol': 1e-8,
             'inner_maxiter': 20,
         }
@@ -139,10 +142,24 @@ def make_newton_sdc_ir_description(
     nvars,
     eps,
     radius,
+    inner_solver='sdc',
     inner_qi='LU',
     cache_inner_step=False,
 ):
-    return make_sdc_ir_description(
+    if inner_solver == 'sdc':
+        return make_sdc_ir_description(
+            dt=dt,
+            num_nodes=num_nodes,
+            outer_tol=outer_tol,
+            outer_maxiter=outer_maxiter,
+            nvars=nvars,
+            eps=eps,
+            radius=radius,
+            inner_qi=inner_qi,
+            cache_inner_step=cache_inner_step,
+        )
+
+    return make_gmres_ir_description(
         dt=dt,
         num_nodes=num_nodes,
         outer_tol=outer_tol,
@@ -150,6 +167,7 @@ def make_newton_sdc_ir_description(
         nvars=nvars,
         eps=eps,
         radius=radius,
+        inner_solver=inner_solver,
         inner_qi=inner_qi,
         cache_inner_step=cache_inner_step,
     )
@@ -163,6 +181,7 @@ def make_newton_sdc_fp64_description(
     nvars,
     eps,
     radius,
+    inner_solver='sdc',
     inner_qi='LU',
     cache_inner_step=False,
 ):
@@ -174,6 +193,7 @@ def make_newton_sdc_fp64_description(
         nvars=nvars,
         eps=eps,
         radius=radius,
+        inner_solver=inner_solver,
         inner_qi=inner_qi,
         cache_inner_step=cache_inner_step,
     )
@@ -348,6 +368,8 @@ def benchmark_configuration(
     nvars,
     eps,
     radius,
+    inner_solver='sdc',
+    inner_qi='LU',
     repeats=2,
 ):
     dt = (t_end - t0) / steps
@@ -373,6 +395,8 @@ def benchmark_configuration(
                 nvars=nvars,
                 eps=eps,
                 radius=radius,
+                inner_solver=inner_solver,
+                inner_qi=inner_qi,
             )
         elif method in ('sdc-ir', 'newton-sdc-ir'):
             description = make_newton_sdc_ir_description(
@@ -383,6 +407,8 @@ def benchmark_configuration(
                 nvars=nvars,
                 eps=eps,
                 radius=radius,
+                inner_solver=inner_solver,
+                inner_qi=inner_qi,
             )
         else:
             raise ValueError(f'Unknown method {method}')
@@ -430,7 +456,7 @@ def create_time_error_plot(output_path, benchmarks, t0, t_end):
 def create_memory_time_plot(output_path, benchmarks, target_tol):
     labels = [entry['method'] for entry in benchmarks]
     times = [entry['elapsed'] * 1e3 for entry in benchmarks]
-    memories = [entry['memory_bytes'] / 1024.0 for entry in benchmarks]
+    memories = [entry['memory_peak_bytes'] / 1024.0 for entry in benchmarks]
     errors = [entry['endpoint_error'] for entry in benchmarks]
 
     fig, axes = plt.subplots(1, 2, figsize=(10, 4.2), constrained_layout=True)
@@ -441,7 +467,7 @@ def create_memory_time_plot(output_path, benchmarks, target_tol):
     axes[0].set_title('Runtime')
 
     axes[1].bar(labels, memories, color=colors)
-    axes[1].set_ylabel('Verified retained NumPy state [KiB]')
+    axes[1].set_ylabel('Peak traced memory [KiB]')
     axes[1].set_title('Memory')
 
     fig.suptitle(f'Allen-Cahn comparison at target tolerance {target_tol:g}')
@@ -454,11 +480,37 @@ def create_memory_time_plot(output_path, benchmarks, target_tol):
     plt.close(fig)
 
 
-def print_results(benchmarks, t0, t_end, steps, num_nodes, target_tol, maxiter, nvars):
+def create_inner_solver_runtime_plot(output_path, solver_benchmarks, target_tol):
+    labels = [entry['inner_solver'] for entry in solver_benchmarks]
+    fp64_times = [entry['newton-sdc-fp64']['elapsed'] * 1e3 for entry in solver_benchmarks]
+    ir_times = [entry['newton-sdc-ir']['elapsed'] * 1e3 for entry in solver_benchmarks]
+
+    x = np.arange(len(labels), dtype=np.float64)
+    width = 0.36
+
+    fig, ax = plt.subplots(figsize=(7.8, 4.6), constrained_layout=True)
+    ax.bar(x - width / 2, fp64_times, width, label='newton-sdc-fp64', color='tab:blue')
+    ax.bar(x + width / 2, ir_times, width, label='newton-sdc-ir', color='tab:pink')
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.set_ylabel('Time to solution [ms]')
+    ax.set_title(f'Allen-Cahn runtime by inner solver at target tolerance {target_tol:g}')
+    ax.grid(True, axis='y', alpha=0.3)
+    ax.legend(loc='best')
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=200, bbox_inches='tight')
+    plt.close(fig)
+
+
+def print_results(benchmarks, t0, t_end, steps, num_nodes, target_tol, maxiter, nvars, inner_solver, inner_qi):
     print('Allen-Cahn benchmark: Newton-SDC fp64 vs Newton-SDC IR fp64/32')
     print(
         f't0={t0}, t_end={t_end}, steps={steps}, num_nodes={num_nodes}, '
-        f'nvars={nvars}, target_tol={target_tol}, maxiter={maxiter}'
+        f'nvars={nvars}, target_tol={target_tol}, maxiter={maxiter}, '
+        f'inner_solver={inner_solver}, inner_qi={inner_qi}'
     )
     print('method              avg_step_time[s]   total_time[s]      end_error       residual        outer_it   inner_it   mem[KiB]   peak[KiB]   status')
     for entry in benchmarks:
@@ -501,6 +553,9 @@ def main(
     nvars=(256, 256),
     eps=0.04,
     radius=0.25,
+    inner_solver='sdc',
+    inner_qi='LU',
+    compare_inner_solvers=(),
 ):
     benchmarks = [
         benchmark_configuration(
@@ -514,19 +569,65 @@ def main(
             nvars=nvars,
             eps=eps,
             radius=radius,
+            inner_solver=inner_solver,
+            inner_qi=inner_qi,
             repeats=2,
         )
         for method in METHODS
     ]
+    solver_benchmarks = None
+    if compare_inner_solvers:
+        solver_benchmarks = []
+        for solver in compare_inner_solvers:
+            solver_benchmarks.append(
+                {
+                    'inner_solver': solver,
+                    'newton-sdc-fp64': benchmark_configuration(
+                        method='newton-sdc-fp64',
+                        t0=t0,
+                        t_end=t_end,
+                        steps=steps,
+                        num_nodes=num_nodes,
+                        tol=target_tol,
+                        maxiter=maxiter,
+                        nvars=nvars,
+                        eps=eps,
+                        radius=radius,
+                        inner_solver=solver,
+                        inner_qi=inner_qi,
+                        repeats=2,
+                    ),
+                    'newton-sdc-ir': benchmark_configuration(
+                        method='newton-sdc-ir',
+                        t0=t0,
+                        t_end=t_end,
+                        steps=steps,
+                        num_nodes=num_nodes,
+                        tol=target_tol,
+                        maxiter=maxiter,
+                        nvars=nvars,
+                        eps=eps,
+                        radius=radius,
+                        inner_solver=solver,
+                        inner_qi=inner_qi,
+                        repeats=2,
+                    ),
+                }
+            )
 
     images_dir = Path(__file__).resolve().parents[3] / 'images'
-    output_path = images_dir / 'allencahn_fp64_vs_sdc_ir_time_error.png'
+    #output_path = images_dir / 'allencahn_fp64_vs_sdc_ir_time_error.png'
     memory_output_path = images_dir / 'allencahn_fp64_vs_sdc_ir_memory_time.png'
-    create_time_error_plot(output_path, benchmarks, t0, t_end)
+    #create_time_error_plot(output_path, benchmarks, t0, t_end)
     create_memory_time_plot(memory_output_path, benchmarks, target_tol)
-    print_results(benchmarks, t0, t_end, steps, num_nodes, target_tol, maxiter, nvars)
-    print(f'Wrote {output_path}')
+    if compare_inner_solvers:
+        solver_runtime_output_path = images_dir / 'allencahn_inner_solver_runtime_comparison.png'
+        create_inner_solver_runtime_plot(solver_runtime_output_path, solver_benchmarks, target_tol)
+    print_results(benchmarks, t0, t_end, steps, num_nodes, target_tol, maxiter, nvars, inner_solver, inner_qi)
+    #print(f'Wrote {output_path}')
     print(f'Wrote {memory_output_path}')
+    if compare_inner_solvers:
+        print(f'Wrote {solver_runtime_output_path}')
 
 
 def parse_args():
@@ -534,14 +635,23 @@ def parse_args():
         description='Compare full-fp64 Newton-SDC against mixed-precision Newton-SDC IR on 2D Allen-Cahn.'
     )
     parser.add_argument('--t0', type=float, default=0.0, help='Initial time')
-    parser.add_argument('--t-end', dest='t_end', type=float, default=0.005, help='Final time')
-    parser.add_argument('--steps', type=int, default=5, help='Number of time steps')
+    parser.add_argument('--t-end', dest='t_end', type=float, default=0.01, help='Final time')
+    parser.add_argument('--steps', type=int, default=10, help='Number of time steps')
     parser.add_argument('--num-nodes', dest='num_nodes', type=int, default=5, help='Number of collocation nodes')
     parser.add_argument('--target-tol', dest='target_tol', type=float, default=1e-08, help='Target stopping tolerance')
     parser.add_argument('--maxiter', type=int, default=100, help='Maximum outer iterations per step')
     parser.add_argument('--nvars', nargs=2, type=int, default=(256, 256), help='Spatial resolution')
     parser.add_argument('--eps', type=float, default=0.04, help='Allen-Cahn epsilon')
     parser.add_argument('--radius', type=float, default=0.25, help='Initial circle radius')
+    parser.add_argument(
+        '--inner-solver',
+        dest='inner_solver',
+        choices=('direct', 'sdc', 'gmres', 'lgmres', 'fgmres'),
+        default='sdc',
+        help='Inner Newton-SDC correction solver for the main comparison',
+    )
+    parser.add_argument('--inner-qi', dest='inner_qi', default='LU', help='Inner preconditioner QI for Newton-SDC')
+    parser.add_argument('--compare-inner-solvers', dest='compare_inner_solvers', nargs='+', choices=('direct', 'sdc', 'gmres', 'lgmres', 'fgmres'), default=(), help='Inner solvers to benchmark additionally and include in the runtime comparison plot')
     return parser.parse_args()
 
 
@@ -557,4 +667,7 @@ if __name__ == '__main__':
         nvars=tuple(args.nvars),
         eps=args.eps,
         radius=args.radius,
+        inner_solver=args.inner_solver,
+        inner_qi=args.inner_qi,
+        compare_inner_solvers=args.compare_inner_solvers,
     )

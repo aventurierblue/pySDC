@@ -13,10 +13,20 @@ from pySDC.core.step import Step
 from pySDC.implementations.problem_classes.HeatEquation_ND_FD import heatNd_unforced
 from pySDC.implementations.sweeper_classes.generic_implicit import generic_implicit
 from pySDC.projects.ir.scalar_sdc_benchmark import (
+    COMPARISON_METHODS,
+    METHOD_BAR_COLORS,
+    METHOD_DISPLAY_NAMES,
+    METHOD_STYLES,
     collect_reachable_arrays,
+    create_speedup_memory_ratio_plot,
+    expand_num_nodes_range,
+    get_linear_ir_sweeper_class,
     get_snapshot_bytes,
+    print_speedup_memory_ratio_summary,
 )
-from pySDC.projects.ir.sweepers import generic_implicit_ir
+
+
+DEFAULT_INNER_ETA = 1e-3
 
 
 def make_heat_description(float_precision, dt, num_nodes, restol, maxiter, nvars=31, nu=0.1, freq=2):
@@ -55,9 +65,11 @@ def make_heat_ir_description(
     outer_maxiter,
     inner_tol,
     inner_maxiter,
+    method='ir-sdc',
     nvars=31,
     nu=0.1,
     freq=2,
+    inner_eta=DEFAULT_INNER_ETA,
 ):
     return {
         'problem_class': heatNd_unforced,
@@ -68,7 +80,7 @@ def make_heat_ir_description(
             'bc': 'dirichlet-zero',
             'float_precision': np.dtype('float64'),
         },
-        'sweeper_class': generic_implicit_ir,
+        'sweeper_class': get_linear_ir_sweeper_class(method),
         'sweeper_params': {
             'quad_type': 'RADAU-RIGHT',
             'num_nodes': num_nodes,
@@ -78,6 +90,8 @@ def make_heat_ir_description(
             'inner_float_precision': np.dtype('float32'),
             'inner_maxiter': inner_maxiter,
             'inner_tol': inner_tol,
+            'inner_eta': inner_eta,
+            'inner_tol_floor': inner_tol,
         },
         'level_params': {
             'restol': outer_tol,
@@ -163,6 +177,8 @@ def run_heat_plain_sdc(
         'elapsed': elapsed,
         'avg_step_time': elapsed / steps,
         'total_niter': total_niter,
+        'total_outer_iterations': total_niter,
+        'total_inner_iterations': 0,
         'restol': restol,
         'dtype': str(float_precision),
         'num_nodes': num_nodes,
@@ -179,9 +195,11 @@ def run_heat_ir_sdc(
     inner_tol,
     outer_maxiter=50,
     inner_maxiter=5,
+    method='ir-sdc',
     nvars=31,
     nu=0.1,
     freq=2,
+    inner_eta=DEFAULT_INNER_ETA,
 ):
     dt = np.float64((t_end - t0) / steps)
     description = make_heat_ir_description(
@@ -191,9 +209,11 @@ def run_heat_ir_sdc(
         outer_maxiter=outer_maxiter,
         inner_tol=inner_tol,
         inner_maxiter=inner_maxiter,
+        method=method,
         nvars=nvars,
         nu=nu,
         freq=freq,
+        inner_eta=inner_eta,
     )
     S = Step(description=description)
     L = S.levels[0]
@@ -298,7 +318,7 @@ def make_heat_benchmark_step(method, dt, num_nodes, tol, maxiter=50, inner_maxit
             )
         )
 
-    if method == 'ir-sdc':
+    if method in COMPARISON_METHODS:
         return Step(
             description=make_heat_ir_description(
                 dt=np.dtype('float64').type(dt),
@@ -307,6 +327,7 @@ def make_heat_benchmark_step(method, dt, num_nodes, tol, maxiter=50, inner_maxit
                 outer_maxiter=maxiter,
                 inner_tol=max(tol, 1e-12),
                 inner_maxiter=inner_maxiter,
+                method=method,
                 nvars=nvars,
                 nu=nu,
                 freq=freq,
@@ -451,7 +472,7 @@ def benchmark_heat_configuration(
                 nu=nu,
                 freq=freq,
             )
-        elif method == 'ir-sdc':
+        elif method in COMPARISON_METHODS:
             result = run_heat_ir_sdc(
                 t0=t0,
                 t_end=t_end,
@@ -461,6 +482,7 @@ def benchmark_heat_configuration(
                 inner_tol=max(tol, 1e-12),
                 outer_maxiter=maxiter,
                 inner_maxiter=inner_maxiter,
+                method=method,
                 nvars=nvars,
                 nu=nu,
                 freq=freq,
@@ -506,21 +528,87 @@ def benchmark_heat_configuration(
     return result
 
 
+def benchmark_heat_num_nodes_sweep(
+    t0,
+    t_end,
+    steps,
+    num_nodes_values,
+    tol,
+    repeats=3,
+    maxiter=50,
+    inner_maxiter=5,
+    nvars=31,
+    nu=0.1,
+    freq=2,
+    comparison_methods=COMPARISON_METHODS,
+):
+    sweep_data = []
+
+    for num_nodes in num_nodes_values:
+        fp64 = benchmark_heat_configuration(
+            method='plain-fp64',
+            t0=t0,
+            t_end=t_end,
+            steps=steps,
+            num_nodes=num_nodes,
+            tol=tol,
+            repeats=repeats,
+            profile_memory=True,
+            maxiter=maxiter,
+            inner_maxiter=inner_maxiter,
+            nvars=nvars,
+            nu=nu,
+            freq=freq,
+        )
+        comparisons = {}
+        for method in comparison_methods:
+            result = benchmark_heat_configuration(
+                method=method,
+                t0=t0,
+                t_end=t_end,
+                steps=steps,
+                num_nodes=num_nodes,
+                tol=tol,
+                repeats=repeats,
+                profile_memory=True,
+                maxiter=maxiter,
+                inner_maxiter=inner_maxiter,
+                nvars=nvars,
+                nu=nu,
+                freq=freq,
+            )
+            comparisons[method] = {
+                'benchmark': result,
+                'speedup': fp64['elapsed'] / result['elapsed'] if result['elapsed'] > 0.0 else np.nan,
+                'memory_ratio': result['memory_peak_bytes'] / fp64['memory_peak_bytes'] if fp64['memory_peak_bytes'] > 0 else np.nan,
+            }
+
+        sweep_data.append(
+            {
+                'num_nodes': num_nodes,
+                'plain-fp64': fp64,
+                'comparisons': comparisons,
+            }
+        )
+
+    return sweep_data
+
+
 def create_heat_memory_time_plot(output_path, benchmarks, target_tol):
     labels = [entry['method'] for entry in benchmarks]
     times = [entry['elapsed'] * 1e3 for entry in benchmarks]
-    memories = [entry['memory_bytes'] / 1024.0 for entry in benchmarks]
+    memories = [entry['memory_peak_bytes'] / 1024.0 for entry in benchmarks]
     errors = [entry['endpoint_error'] for entry in benchmarks]
 
     fig, axes = plt.subplots(1, 2, figsize=(10, 4.2), constrained_layout=True)
-    colors = ['tab:blue', 'tab:orange', 'tab:green']
+    colors = [METHOD_BAR_COLORS.get(entry['method'], 'tab:gray') for entry in benchmarks]
 
     axes[0].bar(labels, times, color=colors)
     axes[0].set_ylabel('Time to solution [ms]')
     axes[0].set_title('Runtime')
 
     axes[1].bar(labels, memories, color=colors)
-    axes[1].set_ylabel('Verified retained NumPy state [KiB]')
+    axes[1].set_ylabel('Peak traced memory [KiB]')
     axes[1].set_title('Memory')
 
     fig.suptitle(f'Heat SDC comparison at target tolerance {target_tol:g}')
@@ -535,18 +623,20 @@ def create_heat_memory_time_plot(output_path, benchmarks, target_tol):
 
 def create_heat_error_runtime_plot(output_path, runtime_data):
     fig, ax = plt.subplots(figsize=(8.2, 5.4), constrained_layout=True)
-    styles = {
-        'plain-fp64': ('tab:blue', 'o'),
-        'plain-fp32': ('tab:orange', 's'),
-        'ir-sdc': ('tab:green', '^'),
-    }
 
     for method, entries in runtime_data.items():
-        color, marker = styles[method]
+        color, marker = METHOD_STYLES[method]
         times = [entry['elapsed'] * 1e3 for entry in entries]
         errors = [entry['endpoint_error'] for entry in entries]
         labels = [entry['target_tol'] for entry in entries]
-        ax.loglog(times, errors, color=color, marker=marker, linewidth=1.5, label=f'Method: {method}')
+        ax.loglog(
+            times,
+            errors,
+            color=color,
+            marker=marker,
+            linewidth=1.5,
+            label=f'Method: {METHOD_DISPLAY_NAMES.get(method, method)}',
+        )
         for time_ms, error, tol in zip(times, errors, labels, strict=True):
             ax.annotate(f'tol={tol:.0e}', (time_ms, error), textcoords='offset points', xytext=(4, 4), fontsize=8)
 
@@ -567,6 +657,7 @@ def main(
     t_end=0.1,
     steps=25,
     num_nodes=3,
+    num_nodes_range=(3, 9),
     target_tol=1e-9,
     maxiter=50,
     inner_maxiter=5,
@@ -574,8 +665,10 @@ def main(
     nu=0.1,
     freq=2,
 ):
-    methods = ['plain-fp64', 'plain-fp32', 'ir-sdc']
+    #methods = ['plain-fp64', 'plain-fp32', 'ir-sdc', 'sdc-ir']
+    methods = ['plain-fp64', 'ir-sdc', 'sdc-ir']
     tolerance_sweep = [1e-8, 1e-9, 1e-10, 1e-11]
+    num_nodes_values = expand_num_nodes_range(num_nodes_range)
 
     benchmarks = [
         benchmark_heat_configuration(
@@ -620,20 +713,42 @@ def main(
         ]
         for method in methods
     }
+    num_nodes_sweep = benchmark_heat_num_nodes_sweep(
+        t0=t0,
+        t_end=t_end,
+        steps=steps,
+        num_nodes_values=num_nodes_values,
+        tol=target_tol,
+        repeats=3,
+        maxiter=maxiter,
+        inner_maxiter=inner_maxiter,
+        nvars=nvars,
+        nu=nu,
+        freq=freq,
+        comparison_methods=COMPARISON_METHODS,
+    )
 
     images_dir = Path(__file__).resolve().parents[3] / 'images'
     create_heat_memory_time_plot(images_dir / 'heat_sdc_memory_time_comparison_pysdc.png', benchmarks, target_tol)
     create_heat_error_runtime_plot(images_dir / 'heat_sdc_error_vs_runtime_pysdc.png', runtime_data)
+    create_speedup_memory_ratio_plot(
+        images_dir / 'heat_sdc_ir_speedup_memory_vs_num_nodes_pysdc.png',
+        num_nodes_sweep,
+        f'Heat IR variants vs. num_nodes at target tolerance {target_tol:g}',
+    )
 
     print('Heat SDC comparison in pySDC')
     print(
         f't0={t0}, t_end={t_end}, steps={steps}, num_nodes={num_nodes}, '
+        f'num_nodes_range={num_nodes_values}, '
         f'target_tol={target_tol}, maxiter={maxiter}, inner_maxiter={inner_maxiter}, '
         f'nvars={nvars}, nu={nu}, freq={freq}'
     )
     for entry in benchmarks:
         print(entry['method'])
         print(f"  time [ms]      = {entry['elapsed'] * 1e3:.3f}")
+        print(f"  outer iters    = {entry['total_outer_iterations']}")
+        print(f"  inner iters    = {entry['total_inner_iterations']}")
         print(f"  memory [KiB]   = {entry['memory_bytes'] / 1024.0:.3f} (verified retained arrays)")
         print(
             f"  split [KiB]    = {entry['memory_verified_float64_bytes'] / 1024.0:.3f} fp64 + "
@@ -643,6 +758,7 @@ def main(
         print(f"  total [KiB]    = {entry['memory_state_bytes'] / 1024.0:.3f} (all traced retained state)")
         print(f"  peak [KiB]     = {entry['memory_peak_bytes'] / 1024.0:.3f} (during warm step)")
         print(f"  endpoint error = {entry['endpoint_error']:.3e}")
+    print_speedup_memory_ratio_summary('Heat num-node sweep: plain-fp64 vs linear IR variants', num_nodes_sweep)
 
 
 def parse_args():
@@ -651,14 +767,23 @@ def parse_args():
     parser.add_argument('--t-end', dest='t_end', type=float, default=5, help='Final time')
     parser.add_argument('--steps', type=int, default=100, help='Number of timesteps')
     parser.add_argument('--num-nodes', dest='num_nodes', type=int, default=5, help='Number of collocation nodes')
-    parser.add_argument('--target-tol', dest='target_tol', type=float, default=1e-9, help='Target stopping tolerance')
+    parser.add_argument(
+        '--num-nodes-range',
+        dest='num_nodes_range',
+        nargs=2,
+        type=int,
+        metavar=('START', 'STOP'),
+        default=(3, 9),
+        help='Inclusive num-node sweep range for the speedup/memory plot',
+    )
+    parser.add_argument('--target-tol', dest='target_tol', type=float, default=1e-11, help='Target stopping tolerance')
     parser.add_argument('--maxiter', '--max-iter', dest='maxiter', type=int, default=50, help='Maximum outer sweeps')
     parser.add_argument(
         '--inner-maxiter',
         '--inner-max-iter',
         dest='inner_maxiter',
         type=int,
-        default=10,
+        default=15,
         help='Maximum inner IR sweeps',
     )
     parser.add_argument('--nvars', type=int, default=31, help='Number of spatial degrees of freedom per dimension')
@@ -674,6 +799,7 @@ if __name__ == '__main__':
         t_end=args.t_end,
         steps=args.steps,
         num_nodes=args.num_nodes,
+        num_nodes_range=tuple(args.num_nodes_range),
         target_tol=args.target_tol,
         maxiter=args.maxiter,
         inner_maxiter=args.inner_maxiter,

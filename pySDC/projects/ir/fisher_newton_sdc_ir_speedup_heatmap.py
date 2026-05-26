@@ -252,8 +252,8 @@ def parse_args():
         description='Create a seaborn speedup heatmap for Newton-SDC IR on the Fisher FD benchmark.'
     )
     parser.add_argument('--t0', type=float, default=0.0, help='Initial time')
-    parser.add_argument('--t-end', dest='t_end', type=float, default=1.0, help='Final time')
-    parser.add_argument('--steps', type=int, default=32, help='Number of time steps')
+    parser.add_argument('--t-end', dest='t_end', type=float, default=5.0, help='Final time')
+    parser.add_argument('--steps', type=int, default=200, help='Number of time steps')
     parser.add_argument(
         '--num-nodes',
         dest='num_nodes_values',
@@ -266,11 +266,11 @@ def parse_args():
         '--nvars',
         nargs='+',
         type=int,
-        default=(127, 255, 511, 1023, 2047),
+        default=(63, 127, 255, 511, 1023, 2047),
         help='Fisher FD resolutions to benchmark',
     )
-    parser.add_argument('--target-tol', dest='target_tol', type=float, default=1e-8, help='Target stopping tolerance')
-    parser.add_argument('--maxiter', type=int, default=20, help='Maximum outer iterations per step')
+    parser.add_argument('--target-tol', dest='target_tol', type=float, default=1e-10, help='Target stopping tolerance')
+    parser.add_argument('--maxiter', type=int, default=30, help='Maximum outer iterations per step')
     parser.add_argument('--repeats', type=int, default=2, help='Timing repeats per configuration')
     parser.add_argument('--nu', type=float, default=1.0, help='Fisher nonlinearity parameter')
     parser.add_argument('--lambda0', type=float, default=2.0, help='Fisher lambda0 parameter')
